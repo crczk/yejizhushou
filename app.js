@@ -301,7 +301,7 @@ function authTpl() {
       <div class="field"><label>账号</label><input name="username" autocomplete="username" placeholder="请输入账号" required></div>
       <div class="field"><label>密码</label><input name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required></div>
       <button class="primary full" type="submit">登录</button>
-      <p class="muted">默认管理员账号：admin，初始密码：admin123。首次上线后建议立即修改密码。</p>
+      <p class="muted"></p>
     </form>
     <form id="registerForm" class="card">
       <div class="section-title"><h2>注册个人账号</h2><span class="pill">个人数据</span></div>
