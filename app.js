@@ -323,7 +323,6 @@ function authTpl() {
       <div class="field"><label>账号</label><input name="username" autocomplete="username" placeholder="请输入账号" required></div>
       <div class="field"><label>密码</label><input name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required></div>
       <button class="primary full" type="submit">登录</button>
-      <p class="muted">默认管理员账号：admin，初始密码：admin123。首次上线后建议立即修改密码。</p>
     </form>
     <form id="registerForm" class="card">
       <div class="section-title"><h2>注册个人账号</h2><span class="pill">个人数据</span></div>
@@ -455,9 +454,8 @@ function settingsTpl() {
       <button class="soft full" type="submit">修改密码</button>
     </form>
   </section>
-  <section class="card">
-    <div class="section-title"><h2>yunduan 数据同步设置</h2><span class="pill">登录后同步</span></div>
-    <p class="muted">先在 yunduan 建一个私有仓库，再填下面信息。Token 会保存在当前浏览器，请勿把此页面和 Token 发给别人。</p>
+  ${isAdmin(user) ? `<section class="card">
+    <div class="section-title"><h2>yunduan 数据同步设置</h2><span class="pill">管理员管理</span></div>
     <form id="configForm">
       <div class="grid">
         <div class="field"><label>yunduan 用户名/组织</label><input name="owner" value="${safeHtml(config.owner)}" placeholder="例如 zhangsan" required></div>
@@ -474,7 +472,13 @@ function settingsTpl() {
       <button id="pullBtn" class="ghost">从 yunduan 拉取</button>
       <button id="pushBtn" class="soft">上传/覆盖到 yunduan</button>
     </div>
-  </section>
+  </section>` : `<section class="card">
+    <div class="section-title"><h2>yunduan 数据同步</h2><span class="pill">使用管理员设置</span></div>
+    <div class="row wrap">
+      <button id="pullBtn" class="ghost">从 yunduan 拉取</button>
+      <button id="pushBtn" class="soft">上传/覆盖到 yunduan</button>
+    </div>
+  </section>`}
   ${isAdmin(user) ? `<section class="card">
     <div class="section-title"><h2>用户账号管理</h2><span class="muted">注册用户自动关联成员</span></div>
     <div class="list">${(state.users || []).map(userItem).join('')}</div>
@@ -588,7 +592,7 @@ function singleTypeDailyTrend(month, typeId, memberId = currentMemberFilter()) {
   const total = values.reduce((a, b) => a + b, 0);
   const max = Math.max(...values, 1);
   return `<div class="trend-head"><div><strong>${safeHtml(t.name)}</strong><div class="muted">本月合计：${formatValue(total, t.unit)}</div></div></div>
-    <div class="chart scroll-chart">${values.map((v, i) => `<div class="bar" title="${i + 1}日 ${num(v)} ${safeHtml(t.unit)}" style="height:${v ? Math.max(5, v / max * 130) : 3}px; background:${t.color}">${v ? `<em>${num(v)}</em>` : ''}<span>${i + 1}</span></div>`).join('')}</div>`;
+    <div class="chart scroll-chart">${values.map((v, i) => `<div class="bar" title="${i + 1}日 ${num(v)} ${safeHtml(t.unit)}" style="height:${v ? Math.max(5, v / max * 115) : 3}px; background:${t.color}">${v ? `<em>${num(v)}</em>` : ''}<span>${i + 1}</span></div>`).join('')}</div>`;
 }
 function bindAuthPage() {
   const loginForm = document.getElementById('loginForm');
@@ -794,7 +798,7 @@ function bindPage() {
 }
 function checkConfig() {
   if (!config.owner || !config.repo || !config.branch || !config.path || !config.token) {
-    page = 'settings'; render(); showToast('请先填写 yunduan 同步设置'); return false;
+    page = 'settings'; render(); showToast(isAdmin() ? '请先填写 yunduan 同步设置' : '同步设置未完成，请联系管理员配置'); return false;
   }
   return true;
 }
