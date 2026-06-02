@@ -10,7 +10,8 @@ const COLORS = ['#155EEF', '#079455', '#DC6803', '#7A5AF8', '#0E9384', '#D92D20'
 const defaultData = () => {
   const now = new Date().toISOString();
   return {
-    version: 4,
+    version: 5,
+    registrationCode: '123456',
     users: [
       {
         id: 'user_admin',
@@ -28,7 +29,7 @@ const defaultData = () => {
       { id: 'member_cuizikun', name: '崔子坤', role: '', active: true, createdAt: now }
     ],
     types: [
-      { id: 'type_credit_card', name: '信用卡', unit: '张', color: '#7A5AF8', active: true, sortOrder: 1, ownerMemberId: 'member_admin' }
+      { id: 'type_credit_card', name: '信用卡', unit: '张', color: '#7A5AF8', active: true, sortOrder: 1, ownerMemberId: 'global', scope: 'global' }
     ],
     records: [],
     updatedAt: now
@@ -51,22 +52,25 @@ function num(n) { return Number(n || 0).toLocaleString('zh-CN', { maximumFractio
 function typeById(id) { return state.types.find(t => t.id === id); }
 function memberById(id) { return state.members.find(m => m.id === id); }
 function typeOwnerId(t) { return t?.ownerMemberId || t?.memberId || ''; }
+function isGlobalType(t) { return t?.scope === 'global' || typeOwnerId(t) === 'global'; }
+function canMemberUseType(type, memberId) { return !!type && (isGlobalType(type) || typeOwnerId(type) === memberId); }
 function typesForMember(memberId, includeInactive = false) {
   return (state.types || [])
-    .filter(t => (!memberId || typeOwnerId(t) === memberId) && (includeInactive || t.active !== false))
-    .sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
+    .filter(t => (isGlobalType(t) || (!memberId || typeOwnerId(t) === memberId)) && (includeInactive || t.active !== false))
+    .sort((a, b) => (isGlobalType(a) === isGlobalType(b) ? 0 : isGlobalType(a) ? -1 : 1) || Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
 }
 function visibleTypes(user = currentUser()) {
   if (!user) return [];
-  if (isAdmin(user)) return (state.types || []).slice().sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
+  if (isAdmin(user)) return (state.types || []).slice().sort((a, b) => (isGlobalType(a) === isGlobalType(b) ? 0 : isGlobalType(a) ? -1 : 1) || Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
   return typesForMember(user.memberId);
 }
 function typeOwnerName(t) {
+  if (isGlobalType(t)) return '管理员公共类型';
   const m = memberById(typeOwnerId(t));
   return m?.name || '未关联成员';
 }
 function typesForOwnerCount(types, memberId) {
-  return (types || []).filter(t => (t.ownerMemberId || t.memberId || '') === memberId).length;
+  return (types || []).filter(t => (memberId === 'global' ? isGlobalType(t) : (t.ownerMemberId || t.memberId || '') === memberId)).length;
 }
 function safeHtml(s) { return String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function normalizeUsername(v) { return String(v || '').trim().toLowerCase(); }
@@ -330,6 +334,7 @@ function authTpl() {
       <div class="field"><label>登录账号</label><input name="username" autocomplete="username" placeholder="建议使用姓名拼音或工号" required></div>
       <div class="field"><label>密码</label><input name="password" type="password" autocomplete="new-password" minlength="4" placeholder="至少 4 位" required></div>
       <div class="field"><label>确认密码</label><input name="confirmPassword" type="password" autocomplete="new-password" minlength="4" required></div>
+      <div class="field"><label>注册校验码</label><input name="registrationCode" placeholder="请输入管理员提供的校验码" required></div>
       <button class="soft full" type="submit">注册并登录</button>
     </form>
   </section>`;
@@ -480,6 +485,13 @@ function settingsTpl() {
     </div>
   </section>`}
   ${isAdmin(user) ? `<section class="card">
+    <div class="section-title"><h2>注册校验码</h2><span class="pill">管理员管理</span></div>
+    <form id="registrationCodeForm" class="mini-form">
+      <div class="field"><label>当前注册校验码</label><input name="registrationCode" value="${safeHtml(state.registrationCode || '')}" placeholder="例如 123456" required></div>
+      <button class="soft full" type="submit">保存注册校验码</button>
+    </form>
+  </section>` : ''}
+  ${isAdmin(user) ? `<section class="card">
     <div class="section-title"><h2>用户账号管理</h2><span class="muted">注册用户自动关联成员</span></div>
     <div class="list">${(state.users || []).map(userItem).join('')}</div>
   </section>
@@ -488,10 +500,10 @@ function settingsTpl() {
     <div class="list">${state.members.map(memberItem).join('')}</div>
   </section>
   <section class="card">
-    <div class="section-title"><h2>所有人的业绩类型</h2><button id="addTypeBtn" class="ghost small">新增类型</button></div>
+    <div class="section-title"><h2>业绩类型管理</h2><button id="addTypeBtn" class="ghost small">新增公共类型</button></div>
     <div class="list">${visibleTypes(user).map(typeItem).join('') || '<div class="empty">暂无业绩类型</div>'}</div>
   </section>` : `<section class="card">
-    <div class="section-title"><h2>我的业绩类型</h2><button id="addTypeBtn" class="ghost small">新增类型</button></div>
+    <div class="section-title"><h2>我的业绩类型</h2><button id="addTypeBtn" class="ghost small">新增个人类型</button></div>
     <div class="list">${visibleTypes(user).map(typeItem).join('') || '<div class="empty">暂无业绩类型，可点击新增类型</div>'}</div>
   </section>`}
   <section class="card">
@@ -541,9 +553,11 @@ function recordItem(r) {
 }
 function typeItem(t) {
   const mine = typeOwnerId(t) === currentUser()?.memberId;
+  const global = isGlobalType(t);
+  const canDelete = isAdmin() || mine;
   return `<div class="item">
-    <div><div class="item-title"><span class="dot" style="background:${t.color}"></span>${safeHtml(t.name)} ${isAdmin() ? `<span class="pill mini">${safeHtml(typeOwnerName(t))}</span>` : ''}</div><div class="item-sub">单位：${safeHtml(t.unit)}${mine && !isAdmin() ? ' · 我的类型' : ''}</div></div>
-    <button class="danger small" data-delete-type="${t.id}">删除</button>
+    <div><div class="item-title"><span class="dot" style="background:${t.color}"></span>${safeHtml(t.name)} ${isAdmin() ? `<span class="pill mini">${safeHtml(typeOwnerName(t))}</span>` : global ? '<span class="pill mini">公共类型</span>' : ''}</div><div class="item-sub">单位：${safeHtml(t.unit)}${mine && !isAdmin() ? ' · 我的类型' : ''}</div></div>
+    ${canDelete ? `<button class="danger small" data-delete-type="${t.id}">删除</button>` : ''}
   </div>`;
 }
 function typeItemReadonly(t) {
@@ -618,6 +632,10 @@ function bindAuthPage() {
     const username = normalizeUsername(fd.get('username'));
     const password = String(fd.get('password') || '');
     const confirmPassword = String(fd.get('confirmPassword') || '');
+    const inputCode = String(fd.get('registrationCode') || '').trim();
+    const requiredCode = String(state.registrationCode || '').trim();
+    if (!requiredCode) { showToast('管理员尚未设置注册校验码，请联系管理员'); return; }
+    if (inputCode !== requiredCode) { showToast('注册校验码不正确'); return; }
     if (!displayName || !username) { showToast('请填写姓名和账号'); return; }
     if (password.length < 4) { showToast('密码至少 4 位'); return; }
     if (password !== confirmPassword) { showToast('两次密码不一致'); return; }
@@ -663,7 +681,7 @@ function bindPage() {
     const memberId = isAdmin(user) ? fd.get('memberId') : user.memberId;
     const typeId = String(fd.get('typeId') || '');
     const selectedType = typeById(typeId);
-    if (!selectedType || typeOwnerId(selectedType) !== memberId) { showToast('请先为该成员新增业绩类型'); return; }
+    if (!canMemberUseType(selectedType, memberId)) { showToast('请选择该成员可用的业绩类型'); return; }
     state.records.push({
       id: uid(),
       memberId,
@@ -716,17 +734,11 @@ function bindPage() {
   const addTypeBtn = document.getElementById('addTypeBtn');
   if (addTypeBtn) addTypeBtn.onclick = () => {
     const user = currentUser();
-    let ownerMemberId = user.memberId;
-    if (isAdmin(user)) {
-      const memberName = prompt('请输入该类型归属成员姓名（留空则归属管理员）', memberById(user.memberId)?.name || user.displayName || '管理员');
-      const matched = memberName ? state.members.find(m => m.name === memberName.trim()) : memberById(user.memberId);
-      if (memberName && !matched) { showToast('未找到该成员，请先新增成员或输入完整姓名'); return; }
-      ownerMemberId = matched?.id || user.memberId;
-    }
-    const name = prompt('请输入业绩类型名称，例如：养老金账户'); if (!name) return;
+    const ownerMemberId = isAdmin(user) ? 'global' : user.memberId;
+    const name = prompt(isAdmin(user) ? '请输入公共业绩类型名称，例如：养老金账户' : '请输入个人业绩类型名称，例如：养老金账户'); if (!name) return;
     const unit = prompt('请输入单位：万元 / 元 / 笔 / 户 / 张 / 次 / 件 / 份', '笔') || '笔';
-    const sameOwnerTypes = typesForMember(ownerMemberId, true);
-    state.types.push({ id: uid(), name: name.trim(), unit: unit.trim(), color: COLORS[state.types.length % COLORS.length], active: true, sortOrder: sameOwnerTypes.length + 1, ownerMemberId, createdBy: user.id, createdAt: new Date().toISOString() });
+    const sameOwnerTypes = typesForOwnerCount(state.types, ownerMemberId);
+    state.types.push({ id: uid(), name: name.trim(), unit: unit.trim(), color: COLORS[state.types.length % COLORS.length], active: true, sortOrder: sameOwnerTypes + 1, ownerMemberId, scope: isAdmin(user) ? 'global' : 'private', createdBy: user.id, createdAt: new Date().toISOString() });
     saveLocal(); render();
   };
   const addMemberBtn = document.getElementById('addMemberBtn');
@@ -777,6 +789,8 @@ function bindPage() {
   if (logoutBtn) logoutBtn.onclick = () => { clearSession(); page = 'auth'; render(); showToast('已退出登录'); };
   const configForm = document.getElementById('configForm');
   if (configForm) configForm.onsubmit = e => { e.preventDefault(); const fd = new FormData(configForm); config = Object.fromEntries(fd.entries()); saveConfig(); showToast('同步设置已保存'); };
+  const registrationCodeForm = document.getElementById('registrationCodeForm');
+  if (registrationCodeForm) registrationCodeForm.onsubmit = e => { e.preventDefault(); const fd = new FormData(registrationCodeForm); state.registrationCode = String(fd.get('registrationCode') || '').trim(); if (!state.registrationCode) { showToast('注册校验码不能为空'); return; } saveLocal(); render(); showToast('注册校验码已保存'); };
   const pullBtn = document.getElementById('pullBtn');
   if (pullBtn) pullBtn.onclick = pullFromYunduan;
   const pushBtn = document.getElementById('pushBtn');
@@ -845,8 +859,8 @@ function dedupeRecords(records) {
 }
 function mergeCurrentUserTypes(remoteTypes = [], localTypes = [], user) {
   if (!user) return mergeTypes(remoteTypes, localTypes);
-  const ownLocal = (localTypes || []).filter(t => typeOwnerId(t) === user.memberId);
-  const othersRemote = (remoteTypes || []).filter(t => typeOwnerId(t) !== user.memberId);
+  const ownLocal = (localTypes || []).filter(t => isGlobalType(t) || typeOwnerId(t) === user.memberId);
+  const othersRemote = (remoteTypes || []).filter(t => !isGlobalType(t) && typeOwnerId(t) !== user.memberId);
   return mergeTypes(othersRemote, ownLocal);
 }
 function mergeCurrentUserData(remoteState, localState, user) {
@@ -919,17 +933,22 @@ function normalizeData(d = {}) {
     active: m.active !== false,
     createdAt: m.createdAt || new Date().toISOString()
   })) : base.members;
-  let types = Array.isArray(d.types) && d.types.length ? d.types.map((t, idx) => ({
-    id: t.id || uid(),
-    name: t.name || `业绩类型${idx + 1}`,
-    unit: t.unit || '笔',
-    color: t.color || COLORS[idx % COLORS.length],
-    active: t.active !== false,
-    sortOrder: Number(t.sortOrder || idx + 1),
-    ownerMemberId: t.ownerMemberId || t.memberId || members[0]?.id || base.members[0].id,
-    createdBy: t.createdBy || '',
-    createdAt: t.createdAt || new Date().toISOString()
-  })) : base.types.map(t => ({ ...t, ownerMemberId: members[0]?.id || base.members[0].id, createdAt: new Date().toISOString() }));
+  let types = Array.isArray(d.types) && d.types.length ? d.types.map((t, idx) => {
+    const rawOwner = t.ownerMemberId || t.memberId || members[0]?.id || base.members[0].id;
+    const global = t.scope === 'global' || rawOwner === 'global' || rawOwner === 'member_admin';
+    return {
+      id: t.id || uid(),
+      name: t.name || `业绩类型${idx + 1}`,
+      unit: t.unit || '笔',
+      color: t.color || COLORS[idx % COLORS.length],
+      active: t.active !== false,
+      sortOrder: Number(t.sortOrder || idx + 1),
+      ownerMemberId: global ? 'global' : rawOwner,
+      scope: global ? 'global' : (t.scope || 'private'),
+      createdBy: t.createdBy || '',
+      createdAt: t.createdAt || new Date().toISOString()
+    };
+  }) : base.types.map(t => ({ ...t, ownerMemberId: 'global', scope: 'global', createdAt: new Date().toISOString() }));
   let users = Array.isArray(d.users) && d.users.length ? d.users.map((u, idx) => ({
     id: u.id || uid(),
     username: normalizeUsername(u.username || `user${idx + 1}`),
@@ -967,7 +986,7 @@ function normalizeData(d = {}) {
   const clonedMap = new Map();
   records = records.map(r => {
     const t = typeMap.get(r.typeId);
-    if (!t || typeOwnerId(t) === r.memberId) return r;
+    if (!t || isGlobalType(t) || typeOwnerId(t) === r.memberId) return r;
     const cloneKey = `${t.id}__${r.memberId}`;
     if (!clonedMap.has(cloneKey)) {
       const clone = { ...t, id: cloneKey, ownerMemberId: r.memberId, sortOrder: typesForOwnerCount(types, r.memberId) + clonedMap.size + 1, createdAt: t.createdAt || new Date().toISOString() };
@@ -977,7 +996,7 @@ function normalizeData(d = {}) {
     return { ...r, typeId: cloneKey };
   });
   if (clonedMap.size) types = [...types, ...Array.from(clonedMap.values())];
-  return { version: 4, users, members, types, records, updatedAt: d.updatedAt || new Date().toISOString() };
+  return { version: 5, registrationCode: d.registrationCode || base.registrationCode || '123456', users, members, types, records, updatedAt: d.updatedAt || new Date().toISOString() };
 }
 function downloadFile(filename, content, type) {
   const blob = new Blob([content], { type });

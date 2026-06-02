@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 5,
   "users": [
     {
       "id": "user_admin",
@@ -35,9 +35,12 @@
       "unit": "张",
       "color": "#7A5AF8",
       "active": true,
-      "sortOrder": 1
+      "sortOrder": 1,
+      "ownerMemberId": "global",
+      "scope": "global"
     }
   ],
   "records": [],
-  "updatedAt": "2026-06-02T00:00:00.000Z"
+  "updatedAt": "2026-06-02T00:00:00.000Z",
+  "registrationCode": "123456"
 }
