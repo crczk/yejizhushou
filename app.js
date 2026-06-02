@@ -269,9 +269,9 @@ function renderHeader() {
   const title = document.querySelector('.topbar h1');
   const syncBtn = document.getElementById('syncBtn');
   if (!eyebrow || !title || !syncBtn) return;
-  title.textContent = '业绩助手';
+  title.textContent = '业绩助手V7';
   if (!user) {
-    eyebrow.textContent = '账号登录 · 权限隔离版';
+    eyebrow.textContent = '账号登录 · 隔离版';
     syncBtn.style.display = 'none';
     return;
   }
@@ -319,7 +319,7 @@ function authTpl() {
   return `<section class="card hero auth-hero">
     <div class="auth-logo">业绩助手</div>
     <h2>登录后使用业绩记录与云同步</h2>
-    <p>普通用户只查看、导出和修改自己的业绩；管理员可查看和管理全部数据。</p>
+    <p>本工具仅作业绩数据统计使用</p>
   </section>
   <section class="auth-grid">
     <form id="loginForm" class="card">
