@@ -1,7 +1,7 @@
-const STORAGE_KEY = 'bank-performance-gitee-webapp-state-v3';
-const OLD_STORAGE_KEYS = ['bank-performance-gitee-webapp-state-v2', 'bank-performance-gitee-webapp-state-v1'];
-const CONFIG_KEY = 'bank-performance-gitee-config-v1';
-const SESSION_KEY = 'bank-performance-gitee-session-v1';
+const STORAGE_KEY = 'bank-performance-yunduan-webapp-state-v4';
+const OLD_STORAGE_KEYS = ['bank-performance-yunduan-webapp-state-v3', 'bank-performance-gitee-webapp-state-v3', 'bank-performance-gitee-webapp-state-v2', 'bank-performance-gitee-webapp-state-v1'];
+const CONFIG_KEY = 'bank-performance-yunduan-config-v1';
+const SESSION_KEY = 'bank-performance-yunduan-session-v1';
 const API_ROOT = 'https://gitee.com/api/v5';
 const DEFAULT_ADMIN_PASSWORD_HASH = '240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9'; // admin123
 
@@ -10,7 +10,7 @@ const COLORS = ['#155EEF', '#079455', '#DC6803', '#7A5AF8', '#0E9384', '#D92D20'
 const defaultData = () => {
   const now = new Date().toISOString();
   return {
-    version: 3,
+    version: 4,
     users: [
       {
         id: 'user_admin',
@@ -28,7 +28,7 @@ const defaultData = () => {
       { id: 'member_cuizikun', name: '崔子坤', role: '', active: true, createdAt: now }
     ],
     types: [
-      { id: 'type_credit_card', name: '信用卡', unit: '张', color: '#7A5AF8', active: true, sortOrder: 1 }
+      { id: 'type_credit_card', name: '信用卡', unit: '张', color: '#7A5AF8', active: true, sortOrder: 1, ownerMemberId: 'member_admin' }
     ],
     records: [],
     updatedAt: now
@@ -50,6 +50,24 @@ function monthStr(d = new Date()) { return `${d.getFullYear()}-${pad2(d.getMonth
 function num(n) { return Number(n || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 }); }
 function typeById(id) { return state.types.find(t => t.id === id); }
 function memberById(id) { return state.members.find(m => m.id === id); }
+function typeOwnerId(t) { return t?.ownerMemberId || t?.memberId || ''; }
+function typesForMember(memberId, includeInactive = false) {
+  return (state.types || [])
+    .filter(t => (!memberId || typeOwnerId(t) === memberId) && (includeInactive || t.active !== false))
+    .sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
+}
+function visibleTypes(user = currentUser()) {
+  if (!user) return [];
+  if (isAdmin(user)) return (state.types || []).slice().sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
+  return typesForMember(user.memberId);
+}
+function typeOwnerName(t) {
+  const m = memberById(typeOwnerId(t));
+  return m?.name || '未关联成员';
+}
+function typesForOwnerCount(types, memberId) {
+  return (types || []).filter(t => (t.ownerMemberId || t.memberId || '') === memberId).length;
+}
 function safeHtml(s) { return String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function normalizeUsername(v) { return String(v || '').trim().toLowerCase(); }
 function nowLocalText() { return new Date().toLocaleString('zh-CN', { hour12: false }); }
@@ -286,8 +304,12 @@ function memberFilterTpl(id = 'memberFilter', includeAll = true, value = current
     ${state.members.map(m => `<option value="${m.id}" ${value === m.id ? 'selected' : ''}>${safeHtml(m.name)}</option>`).join('')}
   </select>`;
 }
-function typeSelectOptions(selected = '') {
-  return state.types.filter(t => t.active !== false).sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0)).map(t => `<option value="${t.id}" ${selected === t.id ? 'selected' : ''}>${safeHtml(t.name)}（${safeHtml(t.unit)}）</option>`).join('');
+function typeSelectOptions(selected = '', memberId = '', includePlaceholder = false) {
+  const user = currentUser();
+  const list = isAdmin(user) && !memberId ? visibleTypes(user) : typesForMember(memberId || user?.memberId || '');
+  if (!list.length) return '<option value="" disabled selected>请先新增该成员的业绩类型</option>';
+  const placeholder = includePlaceholder ? `<option value="" disabled ${selected ? '' : 'selected'}>请选择业绩类型</option>` : '';
+  return placeholder + list.map(t => `<option value="${t.id}" ${selected === t.id ? 'selected' : ''}>${safeHtml(t.name)}（${safeHtml(t.unit)}）</option>`).join('');
 }
 function authTpl() {
   return `<section class="card hero auth-hero">
@@ -301,7 +323,7 @@ function authTpl() {
       <div class="field"><label>账号</label><input name="username" autocomplete="username" placeholder="请输入账号" required></div>
       <div class="field"><label>密码</label><input name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required></div>
       <button class="primary full" type="submit">登录</button>
-      <p class="muted"></p>
+      <p class="muted">默认管理员账号：admin，初始密码：admin123。首次上线后建议立即修改密码。</p>
     </form>
     <form id="registerForm" class="card">
       <div class="section-title"><h2>注册个人账号</h2><span class="pill">个人数据</span></div>
@@ -357,13 +379,13 @@ function addTpl() {
   const user = currentUser();
   ensureUserMember(user);
   const memberField = isAdmin(user)
-    ? `<div class="field"><label>成员</label><select name="memberId" required>${state.members.map(m => `<option value="${m.id}">${safeHtml(m.name)}${m.role ? ' · ' + safeHtml(m.role) : ''}</option>`).join('')}</select></div>`
+    ? `<div class="field"><label>成员</label><select id="recordMemberSelect" name="memberId" required>${state.members.map(m => `<option value="${m.id}">${safeHtml(m.name)}${m.role ? ' · ' + safeHtml(m.role) : ''}</option>`).join('')}</select></div>`
     : `<input type="hidden" name="memberId" value="${safeHtml(user.memberId)}"><div class="field"><label>成员</label><div class="readonly-box">${safeHtml(memberById(user.memberId)?.name || user.displayName || user.username)} · 仅记录自己的业绩</div></div>`;
   return `<section class="card">
     <div class="section-title"><h2>新增业绩记录</h2><span class="muted">登录后按账号自动归属</span></div>
     <form id="recordForm">
       ${memberField}
-      <div class="field"><label>业绩类型</label><select name="typeId" required>${typeSelectOptions()}</select></div>
+      <div class="field"><label>业绩类型</label><select id="recordTypeSelect" name="typeId" required>${typeSelectOptions('', isAdmin(user) ? (state.members[0]?.id || '') : user.memberId, true)}</select></div>
       <div class="field"><label>上报数量 / 数值</label><input name="value" type="number" inputmode="decimal" step="0.01" min="0" placeholder="例如 50、3、1" required /></div>
       <div class="field"><label>日期</label><input name="date" type="date" value="${todayStr()}" required /></div>
       <div class="field"><label>备注</label><textarea name="remark" placeholder="例如：信用卡上报情况。不要填写身份证、银行卡号等敏感信息。"></textarea></div>
@@ -394,7 +416,8 @@ function dayTpl() {
 function monthTpl() {
   const month = window.__selectedMonth || monthStr();
   const memberId = currentMemberFilter();
-  const selectedType = window.__selectedTypeId || state.types[0]?.id || '';
+  const availableTrendTypes = isAdmin() && memberId === 'all' ? visibleTypes() : typesForMember(memberId);
+  const selectedType = availableTrendTypes.some(t => t.id === window.__selectedTypeId) ? window.__selectedTypeId : (availableTrendTypes[0]?.id || '');
   const recs = monthRecords(month, memberId);
   const typeItems = typeSummary(recs);
   return `<section class="card">
@@ -407,7 +430,7 @@ function monthTpl() {
     ${typeBarChart(typeItems)}
   </section>
   <section class="card">
-    <div class="section-title"><h2>单项业绩每日趋势</h2><select id="trendTypePicker" class="compact-select">${typeSelectOptions(selectedType)}</select></div>
+    <div class="section-title"><h2>单项业绩每日趋势</h2><select id="trendTypePicker" class="compact-select">${isAdmin() && memberId === 'all' ? typeSelectOptions(selectedType, '') : typeSelectOptions(selectedType, memberId)}</select></div>
     ${singleTypeDailyTrend(month, selectedType, memberId)}
   </section>
   <section class="card">
@@ -433,11 +456,11 @@ function settingsTpl() {
     </form>
   </section>
   <section class="card">
-    <div class="section-title"><h2>数据同步设置</h2><span class="pill">登录后同步</span></div>
-    <p class="muted">先建一个私有仓库，再填下面信息。</p>
+    <div class="section-title"><h2>yunduan 数据同步设置</h2><span class="pill">登录后同步</span></div>
+    <p class="muted">先在 yunduan 建一个私有仓库，再填下面信息。Token 会保存在当前浏览器，请勿把此页面和 Token 发给别人。</p>
     <form id="configForm">
       <div class="grid">
-        <div class="field"><label>用户名/组织</label><input name="owner" value="${safeHtml(config.owner)}" placeholder="例如 zhangsan" required></div>
+        <div class="field"><label>yunduan 用户名/组织</label><input name="owner" value="${safeHtml(config.owner)}" placeholder="例如 zhangsan" required></div>
         <div class="field"><label>仓库名</label><input name="repo" value="${safeHtml(config.repo)}" placeholder="例如 performance-data" required></div>
       </div>
       <div class="grid">
@@ -448,8 +471,8 @@ function settingsTpl() {
       <button class="primary full" type="submit">保存同步设置</button>
     </form>
     <div class="row wrap" style="margin-top:10px">
-      <button id="pullBtn" class="ghost">拉取</button>
-      <button id="pushBtn" class="soft">上传/覆盖</button>
+      <button id="pullBtn" class="ghost">从 yunduan 拉取</button>
+      <button id="pushBtn" class="soft">上传/覆盖到 yunduan</button>
     </div>
   </section>
   ${isAdmin(user) ? `<section class="card">
@@ -461,11 +484,11 @@ function settingsTpl() {
     <div class="list">${state.members.map(memberItem).join('')}</div>
   </section>
   <section class="card">
-    <div class="section-title"><h2>业绩类型</h2><button id="addTypeBtn" class="ghost small">新增类型</button></div>
-    <div class="list">${state.types.map(typeItem).join('')}</div>
+    <div class="section-title"><h2>所有人的业绩类型</h2><button id="addTypeBtn" class="ghost small">新增类型</button></div>
+    <div class="list">${visibleTypes(user).map(typeItem).join('') || '<div class="empty">暂无业绩类型</div>'}</div>
   </section>` : `<section class="card">
-    <div class="section-title"><h2>可用业绩类型</h2><span class="muted">由管理员维护</span></div>
-    <div class="list">${state.types.map(typeItemReadonly).join('')}</div>
+    <div class="section-title"><h2>我的业绩类型</h2><button id="addTypeBtn" class="ghost small">新增类型</button></div>
+    <div class="list">${visibleTypes(user).map(typeItem).join('') || '<div class="empty">暂无业绩类型，可点击新增类型</div>'}</div>
   </section>`}
   <section class="card">
     <div class="section-title"><h2>${toolsTitle}</h2></div>
@@ -513,16 +536,14 @@ function recordItem(r) {
   </div>`;
 }
 function typeItem(t) {
+  const mine = typeOwnerId(t) === currentUser()?.memberId;
   return `<div class="item">
-    <div><div class="item-title"><span class="dot" style="background:${t.color}"></span>${safeHtml(t.name)}</div><div class="item-sub">单位：${safeHtml(t.unit)}</div></div>
+    <div><div class="item-title"><span class="dot" style="background:${t.color}"></span>${safeHtml(t.name)} ${isAdmin() ? `<span class="pill mini">${safeHtml(typeOwnerName(t))}</span>` : ''}</div><div class="item-sub">单位：${safeHtml(t.unit)}${mine && !isAdmin() ? ' · 我的类型' : ''}</div></div>
     <button class="danger small" data-delete-type="${t.id}">删除</button>
   </div>`;
 }
 function typeItemReadonly(t) {
-  return `<div class="item">
-    <div><div class="item-title"><span class="dot" style="background:${t.color}"></span>${safeHtml(t.name)}</div><div class="item-sub">单位：${safeHtml(t.unit)}</div></div>
-    <span class="pill">只读</span>
-  </div>`;
+  return typeItem(t);
 }
 function memberItem(m) {
   return `<div class="item">
@@ -567,7 +588,7 @@ function singleTypeDailyTrend(month, typeId, memberId = currentMemberFilter()) {
   const total = values.reduce((a, b) => a + b, 0);
   const max = Math.max(...values, 1);
   return `<div class="trend-head"><div><strong>${safeHtml(t.name)}</strong><div class="muted">本月合计：${formatValue(total, t.unit)}</div></div></div>
-    <div class="chart scroll-chart">${values.map((v, i) => `<div class="bar" title="${i + 1}日 ${num(v)} ${safeHtml(t.unit)}" style="height:${v ? Math.max(5, v / max * 130) : 3}px; background:${t.color}"><span>${i + 1}</span></div>`).join('')}</div>`;
+    <div class="chart scroll-chart">${values.map((v, i) => `<div class="bar" title="${i + 1}日 ${num(v)} ${safeHtml(t.unit)}" style="height:${v ? Math.max(5, v / max * 130) : 3}px; background:${t.color}">${v ? `<em>${num(v)}</em>` : ''}<span>${i + 1}</span></div>`).join('')}</div>`;
 }
 function bindAuthPage() {
   const loginForm = document.getElementById('loginForm');
@@ -624,6 +645,11 @@ function bindPage() {
     const el = document.getElementById(id);
     if (el) el.onchange = e => { window.__memberFilter = e.target.value; render(); };
   });
+  const recordMemberSelect = document.getElementById('recordMemberSelect');
+  const recordTypeSelect = document.getElementById('recordTypeSelect');
+  if (recordMemberSelect && recordTypeSelect) recordMemberSelect.onchange = e => {
+    recordTypeSelect.innerHTML = typeSelectOptions('', e.target.value, true);
+  };
   const recordForm = document.getElementById('recordForm');
   if (recordForm) recordForm.onsubmit = e => {
     e.preventDefault();
@@ -631,10 +657,13 @@ function bindPage() {
     const fd = new FormData(recordForm);
     const user = currentUser();
     const memberId = isAdmin(user) ? fd.get('memberId') : user.memberId;
+    const typeId = String(fd.get('typeId') || '');
+    const selectedType = typeById(typeId);
+    if (!selectedType || typeOwnerId(selectedType) !== memberId) { showToast('请先为该成员新增业绩类型'); return; }
     state.records.push({
       id: uid(),
       memberId,
-      typeId: fd.get('typeId'),
+      typeId,
       value: Number(fd.get('value')),
       date: fd.get('date') || todayStr(),
       remark: fd.get('remark'),
@@ -645,6 +674,7 @@ function bindPage() {
     showToast('已保存到本地');
     recordForm.reset();
     if (recordForm.memberId) recordForm.memberId.value = isAdmin(user) ? (state.members[0]?.id || '') : user.memberId;
+    if (recordTypeSelect) recordTypeSelect.innerHTML = typeSelectOptions('', isAdmin(user) ? (state.members[0]?.id || '') : user.memberId, true);
     recordForm.date.value = todayStr();
   };
   const dayPicker = document.getElementById('dayPicker');
@@ -661,7 +691,9 @@ function bindPage() {
     saveLocal(); render();
   });
   document.querySelectorAll('[data-delete-type]').forEach(b => b.onclick = () => {
-    if (!isAdmin()) { showToast('只有管理员可以维护业绩类型'); return; }
+    const t = typeById(b.dataset.deleteType);
+    if (!t) return;
+    if (!isAdmin() && typeOwnerId(t) !== currentUser()?.memberId) { showToast('只能删除自己的业绩类型'); return; }
     if (state.records.some(r => r.typeId === b.dataset.deleteType)) { showToast('该类型已有记录，不能直接删除'); return; }
     if (!confirm('确定删除该业绩类型？')) return;
     state.types = state.types.filter(t => t.id !== b.dataset.deleteType);
@@ -679,10 +711,18 @@ function bindPage() {
   });
   const addTypeBtn = document.getElementById('addTypeBtn');
   if (addTypeBtn) addTypeBtn.onclick = () => {
-    if (!isAdmin()) { showToast('只有管理员可以新增业绩类型'); return; }
+    const user = currentUser();
+    let ownerMemberId = user.memberId;
+    if (isAdmin(user)) {
+      const memberName = prompt('请输入该类型归属成员姓名（留空则归属管理员）', memberById(user.memberId)?.name || user.displayName || '管理员');
+      const matched = memberName ? state.members.find(m => m.name === memberName.trim()) : memberById(user.memberId);
+      if (memberName && !matched) { showToast('未找到该成员，请先新增成员或输入完整姓名'); return; }
+      ownerMemberId = matched?.id || user.memberId;
+    }
     const name = prompt('请输入业绩类型名称，例如：养老金账户'); if (!name) return;
     const unit = prompt('请输入单位：万元 / 元 / 笔 / 户 / 张 / 次 / 件 / 份', '笔') || '笔';
-    state.types.push({ id: uid(), name, unit, color: COLORS[state.types.length % COLORS.length], active: true, sortOrder: state.types.length + 1 });
+    const sameOwnerTypes = typesForMember(ownerMemberId, true);
+    state.types.push({ id: uid(), name: name.trim(), unit: unit.trim(), color: COLORS[state.types.length % COLORS.length], active: true, sortOrder: sameOwnerTypes.length + 1, ownerMemberId, createdBy: user.id, createdAt: new Date().toISOString() });
     saveLocal(); render();
   };
   const addMemberBtn = document.getElementById('addMemberBtn');
@@ -734,9 +774,9 @@ function bindPage() {
   const configForm = document.getElementById('configForm');
   if (configForm) configForm.onsubmit = e => { e.preventDefault(); const fd = new FormData(configForm); config = Object.fromEntries(fd.entries()); saveConfig(); showToast('同步设置已保存'); };
   const pullBtn = document.getElementById('pullBtn');
-  if (pullBtn) pullBtn.onclick = pullFromGitee;
+  if (pullBtn) pullBtn.onclick = pullFromYunduan;
   const pushBtn = document.getElementById('pushBtn');
-  if (pushBtn) pushBtn.onclick = pushToGitee;
+  if (pushBtn) pushBtn.onclick = pushToYunduan;
   const exportExcelBtn = document.getElementById('exportExcelBtn');
   if (exportExcelBtn) exportExcelBtn.onclick = exportExcel;
   const exportCsvBtn = document.getElementById('exportCsvBtn');
@@ -754,7 +794,7 @@ function bindPage() {
 }
 function checkConfig() {
   if (!config.owner || !config.repo || !config.branch || !config.path || !config.token) {
-    page = 'settings'; render(); showToast('请先填写同步设置'); return false;
+    page = 'settings'; render(); showToast('请先填写 yunduan 同步设置'); return false;
   }
   return true;
 }
@@ -799,6 +839,12 @@ function dedupeRecords(records) {
   (records || []).forEach(r => { if (r?.id) map.set(r.id, r); });
   return Array.from(map.values()).sort((a, b) => (a.date || '').localeCompare(b.date || '') || (a.createdAt || '').localeCompare(b.createdAt || ''));
 }
+function mergeCurrentUserTypes(remoteTypes = [], localTypes = [], user) {
+  if (!user) return mergeTypes(remoteTypes, localTypes);
+  const ownLocal = (localTypes || []).filter(t => typeOwnerId(t) === user.memberId);
+  const othersRemote = (remoteTypes || []).filter(t => typeOwnerId(t) !== user.memberId);
+  return mergeTypes(othersRemote, ownLocal);
+}
 function mergeCurrentUserData(remoteState, localState, user) {
   if (!user || isAdmin(user)) return remoteState;
   const member = (localState.members || []).find(m => m.id === user.memberId) || { id: user.memberId, name: user.displayName || user.username, role: '成员', active: true, createdAt: user.createdAt || new Date().toISOString() };
@@ -807,32 +853,32 @@ function mergeCurrentUserData(remoteState, localState, user) {
     ...remoteState,
     users: upsertById(remoteState.users, user),
     members: upsertById(remoteState.members, member),
-    types: mergeTypes(remoteState.types, localState.types),
+    types: mergeCurrentUserTypes(remoteState.types, localState.types, user),
     records: dedupeRecords([...(remoteState.records || []).filter(r => r.memberId !== user.memberId), ...localOwnRecords])
   });
 }
-async function pullFromGitee() {
+async function pullFromYunduan() {
   if (!requireAuth('请先登录后再拉取数据')) return;
   if (!checkConfig()) return;
   try {
-    showToast('正在从 云端 拉取...');
+    showToast('正在从 yunduan 拉取...');
     const userBefore = currentUser();
     const localBefore = state;
     const remote = await getRemoteFile();
-    if (!remote) { showToast('云端 上还没有数据文件，可先上传'); return; }
+    if (!remote) { showToast('yunduan 上还没有数据文件，可先上传'); return; }
     let nextState = normalizeData(remote.data);
     if (!isAdmin(userBefore)) nextState = mergeCurrentUserData(nextState, localBefore, userBefore);
     state = nextState;
     saveLocal();
     render();
-    showToast('已从 云端 同步到本机');
+    showToast('已从 yunduan 同步到本机');
   } catch (err) { console.error(err); showToast('拉取失败：请检查 Token、仓库、分支或跨域限制'); }
 }
-async function pushToGitee() {
+async function pushToYunduan() {
   if (!requireAuth('请先登录后再上传数据')) return;
   if (!checkConfig()) return;
   try {
-    showToast('正在上传到 云端...');
+    showToast('正在上传到 yunduan...');
     const user = currentUser();
     let sha = '';
     let uploadState = state;
@@ -857,7 +903,7 @@ async function pushToGitee() {
     if (!res.ok) throw new Error(await res.text());
     const json = await res.json(); remoteSha = json.content?.sha || json.sha || '';
     if (!isAdmin(user)) { state = uploadState; saveLocal(); }
-    showToast('已上传到 云端');
+    showToast('已上传到 yunduan');
   } catch (err) { console.error(err); showToast('上传失败：请检查仓库权限、路径或 Token'); }
 }
 function normalizeData(d = {}) {
@@ -875,8 +921,11 @@ function normalizeData(d = {}) {
     unit: t.unit || '笔',
     color: t.color || COLORS[idx % COLORS.length],
     active: t.active !== false,
-    sortOrder: Number(t.sortOrder || idx + 1)
-  })) : base.types;
+    sortOrder: Number(t.sortOrder || idx + 1),
+    ownerMemberId: t.ownerMemberId || t.memberId || members[0]?.id || base.members[0].id,
+    createdBy: t.createdBy || '',
+    createdAt: t.createdAt || new Date().toISOString()
+  })) : base.types.map(t => ({ ...t, ownerMemberId: members[0]?.id || base.members[0].id, createdAt: new Date().toISOString() }));
   let users = Array.isArray(d.users) && d.users.length ? d.users.map((u, idx) => ({
     id: u.id || uid(),
     username: normalizeUsername(u.username || `user${idx + 1}`),
@@ -899,7 +948,7 @@ function normalizeData(d = {}) {
   });
   const defaultMemberId = members[0]?.id || base.members[0].id;
   const typeIds = new Set(types.map(t => t.id));
-  const records = Array.isArray(d.records) ? d.records.map(r => ({
+  let records = Array.isArray(d.records) ? d.records.map(r => ({
     id: r.id || uid(),
     memberId: r.memberId || defaultMemberId,
     typeId: r.typeId || types[0]?.id || '',
@@ -909,7 +958,22 @@ function normalizeData(d = {}) {
     createdAt: r.createdAt || new Date().toISOString(),
     createdBy: r.createdBy || ''
   })).filter(r => r.typeId && typeIds.has(r.typeId)) : [];
-  return { version: 3, users, members, types, records, updatedAt: d.updatedAt || new Date().toISOString() };
+  // v4：业绩类型按成员独立。旧数据中没有归属人的类型，会按记录成员自动复制一份，避免历史记录丢失。
+  const typeMap = new Map(types.map(t => [t.id, t]));
+  const clonedMap = new Map();
+  records = records.map(r => {
+    const t = typeMap.get(r.typeId);
+    if (!t || typeOwnerId(t) === r.memberId) return r;
+    const cloneKey = `${t.id}__${r.memberId}`;
+    if (!clonedMap.has(cloneKey)) {
+      const clone = { ...t, id: cloneKey, ownerMemberId: r.memberId, sortOrder: typesForOwnerCount(types, r.memberId) + clonedMap.size + 1, createdAt: t.createdAt || new Date().toISOString() };
+      clonedMap.set(cloneKey, clone);
+      typeMap.set(cloneKey, clone);
+    }
+    return { ...r, typeId: cloneKey };
+  });
+  if (clonedMap.size) types = [...types, ...Array.from(clonedMap.values())];
+  return { version: 4, users, members, types, records, updatedAt: d.updatedAt || new Date().toISOString() };
 }
 function downloadFile(filename, content, type) {
   const blob = new Blob([content], { type });
@@ -966,6 +1030,6 @@ document.querySelectorAll('.tabbar button').forEach(b => b.onclick = () => {
   if (!requireAuth('请先登录后再使用')) return;
   page = b.dataset.page; render();
 });
-document.getElementById('syncBtn').onclick = pushToGitee;
+document.getElementById('syncBtn').onclick = pushToYunduan;
 if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
 render();
