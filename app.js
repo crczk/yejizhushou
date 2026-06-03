@@ -269,7 +269,7 @@ function renderHeader() {
   const title = document.querySelector('.topbar h1');
   const syncBtn = document.getElementById('syncBtn');
   if (!eyebrow || !title || !syncBtn) return;
-  title.textContent = '业绩助手';
+  title.textContent = '业绩助手-v11';
   if (!user) {
     eyebrow.textContent = '账号登录 · 权限隔离版';
     syncBtn.style.display = 'none';
