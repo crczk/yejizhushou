@@ -349,7 +349,7 @@ function cloudConfigTpl() {
 function authTpl() {
   const ready = cloudReady();
   return `<section class="card hero auth-hero">
-    <div class="auth-logo">业绩助手</div>
+    <div class="auth-logo">业绩助手-v11</div>
     <h2>登录前先连接云端数据库</h2>
     <p>连接成功后，登录会使用云端最新账号数据；注册会使用管理员最新设置的注册校验码。</p>
   </section>
