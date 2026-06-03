@@ -454,7 +454,7 @@ function monthTpl() {
   const month = window.__selectedMonth || monthStr();
   const memberId = currentMemberFilter();
   const availableTrendTypes = isAdmin() && memberId === 'all' ? visibleTypes() : typesForMember(memberId);
-  const selectedType = availableTrendTypes.some(t => t.id === window.__selectedTypeId) ? window.__selectedTypeId : (availableTrendTypes[0]?.id || '');
+  const selectedType = availableTrendTypes.some(t => t.id === window.__selectedTypeId) ? window.__selectedTypeId : '';
   const recs = monthRecords(month, memberId);
   const typeItems = typeSummary(recs);
   return `<section class="card">
@@ -467,8 +467,8 @@ function monthTpl() {
     ${typeBarChart(typeItems)}
   </section>
   <section class="card">
-    <div class="section-title"><h2>单项业绩每日趋势</h2><select id="trendTypePicker" class="compact-select">${isAdmin() && memberId === 'all' ? typeSelectOptions(selectedType, '') : typeSelectOptions(selectedType, memberId)}</select></div>
-    ${singleTypeDailyTrend(month, selectedType, memberId)}
+    <div class="section-title"><h2>单项业绩每日趋势</h2><select id="trendTypePicker" class="compact-select">${isAdmin() && memberId === 'all' ? typeSelectOptions(selectedType, '', true) : typeSelectOptions(selectedType, memberId, true)}</select></div>
+    ${availableTrendTypes.length ? singleTypeDailyTrend(month, selectedType, memberId) : '<div class="empty">请先新增业绩类型</div>'}
   </section>
   <section class="card">
     <div class="section-title"><h2>本月各项上报汇总</h2></div>${summaryList(typeItems, true)}
@@ -635,8 +635,9 @@ function typeBarChart(items) {
     </div>`).join('')}</div>`;
 }
 function singleTypeDailyTrend(month, typeId, memberId = currentMemberFilter()) {
+  if (!typeId) return `<div class="empty">请选择业绩类型后查看每日趋势</div>`;
   const t = typeById(typeId);
-  if (!t) return `<div class="empty">请先新增业绩类型</div>`;
+  if (!t) return `<div class="empty">请选择有效的业绩类型</div>`;
   const days = daysInMonth(month);
   const monthRecs = monthRecords(month, memberId);
   const values = Array.from({ length: days }, (_, i) => {
