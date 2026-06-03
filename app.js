@@ -1152,27 +1152,54 @@ function normalizeData(d = {}) {
   if (clonedMap.size) types = [...types, ...Array.from(clonedMap.values())];
   return { version: 5, registrationCode: d.registrationCode || base.registrationCode || '123456', users, members, types, records, updatedAt: d.updatedAt || new Date().toISOString() };
 }
-function downloadFile(filename, content, type) {
-  const blob = new Blob([content], { type });
+function downloadBlob(filename, blob) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob); a.download = filename; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function downloadFile(filename, content, type) {
+  downloadBlob(filename, new Blob([content], { type }));
 }
 function excelCell(v) {
   return safeHtml(v ?? '');
 }
 function txtUnitSuffix(unit) {
   const u = String(unit || '').trim();
-  const map = { '万': 'w', '万元': 'w', '克': 'g', '个': '个', '张': '张', '户': '户', '笔': '笔' };
-  return map[u] ?? u;
+  const map = {
+    '万': 'w', '万元': 'w', 'w': 'w', 'W': 'w',
+    '克': 'g', 'g': 'g', 'G': 'g',
+    '张': '', '个': '', '户': '', '笔': '', '人': '', '次': '', '条': '', '份': ''
+  };
+  return Object.prototype.hasOwnProperty.call(map, u) ? map[u] : u;
 }
 function formatTxtNumber(value) {
   const n = Number(value || 0);
   if (Number.isInteger(n)) return String(n);
   return String(Math.round(n * 100) / 100).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
 }
+function orderedTxtSummary(records) {
+  const map = new Map();
+  records.forEach(r => {
+    const t = typeById(r.typeId) || { id: r.typeId, name: '已删除类型', unit: '', color: '#98A2B3', sortOrder: 999999 };
+    if (!map.has(t.id)) map.set(t.id, { type: t, value: 0, count: 0 });
+    const item = map.get(t.id);
+    item.value += Number(r.value || 0);
+    item.count += 1;
+  });
+  const typeOrder = new Map((state.types || []).map((t, idx) => [t.id, idx]));
+  return Array.from(map.values())
+    .filter(x => Number(x.value || 0) !== 0)
+    .sort((a, b) => {
+      const ag = isGlobalType(a.type) ? 0 : 1;
+      const bg = isGlobalType(b.type) ? 0 : 1;
+      return ag - bg
+        || Number(a.type.sortOrder || 0) - Number(b.type.sortOrder || 0)
+        || (typeOrder.get(a.type.id) ?? 999999) - (typeOrder.get(b.type.id) ?? 999999)
+        || String(a.type.name || '').localeCompare(String(b.type.name || ''), 'zh-CN');
+    });
+}
 function memberMonthlyTxt(member, month, records) {
-  const summary = typeSummary(records).filter(x => Number(x.value || 0) !== 0);
+  const summary = orderedTxtSummary(records);
   const name = member?.name || member?.displayName || member?.username || '未命名';
   const lines = [`姓名：${name}`, '业绩：'];
   if (summary.length) {
@@ -1185,24 +1212,141 @@ function memberMonthlyTxt(member, month, records) {
 function safeFilename(name) {
   return String(name || '未命名').replace(/[\\/:*?"<>|\s]+/g, '_').replace(/^_+|_+$/g, '') || '未命名';
 }
-function exportTxt() {
+function formatBytes(bytes) {
+  const n = Number(bytes || 0);
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1).replace(/\.0$/, '')} KB`;
+  return `${(n / 1024 / 1024).toFixed(2).replace(/\.00$/, '')} MB`;
+}
+async function syncLatestBeforeExport() {
+  if (!checkConfig()) return false;
+  try {
+    showToast('正在同步最新云端数据...');
+    const userBefore = currentUser();
+    const localBefore = state;
+    const remote = await getRemoteFile();
+    if (remote?.data) {
+      let nextState = normalizeData(remote.data);
+      if (!isAdmin(userBefore)) nextState = mergeCurrentUserData(nextState, localBefore, userBefore);
+      state = nextState;
+      saveLocal();
+      render();
+    }
+    return true;
+  } catch (err) {
+    console.error(err);
+    showToast('同步失败：请检查云端配置、Token 或网络后再导出');
+    return false;
+  }
+}
+function crc32(bytes) {
+  let crc = -1;
+  for (let i = 0; i < bytes.length; i++) {
+    crc ^= bytes[i];
+    for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ (0xEDB88320 & -(crc & 1));
+  }
+  return (crc ^ -1) >>> 0;
+}
+function dosDateTime(date = new Date()) {
+  const year = Math.max(1980, date.getFullYear());
+  const dosTime = (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2);
+  const dosDate = ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate();
+  return { dosTime, dosDate };
+}
+function writeU16(view, offset, value) { view.setUint16(offset, value, true); return offset + 2; }
+function writeU32(view, offset, value) { view.setUint32(offset, value >>> 0, true); return offset + 4; }
+function concatUint8Arrays(parts, totalLength = parts.reduce((sum, part) => sum + part.length, 0)) {
+  const out = new Uint8Array(totalLength);
+  let offset = 0;
+  parts.forEach(part => { out.set(part, offset); offset += part.length; });
+  return out;
+}
+function zipStoredBlob(files) {
+  const encoder = new TextEncoder();
+  const { dosTime, dosDate } = dosDateTime();
+  const locals = [];
+  const centrals = [];
+  let offset = 0;
+  files.forEach(file => {
+    const nameBytes = encoder.encode(file.name);
+    const dataBytes = encoder.encode(file.content);
+    const crc = crc32(dataBytes);
+    const local = new Uint8Array(30 + nameBytes.length);
+    let p = 0;
+    const lv = new DataView(local.buffer);
+    p = writeU32(lv, p, 0x04034b50);
+    p = writeU16(lv, p, 20);
+    p = writeU16(lv, p, 0x0800);
+    p = writeU16(lv, p, 0);
+    p = writeU16(lv, p, dosTime);
+    p = writeU16(lv, p, dosDate);
+    p = writeU32(lv, p, crc);
+    p = writeU32(lv, p, dataBytes.length);
+    p = writeU32(lv, p, dataBytes.length);
+    p = writeU16(lv, p, nameBytes.length);
+    p = writeU16(lv, p, 0);
+    local.set(nameBytes, p);
+    locals.push(local, dataBytes);
+
+    const central = new Uint8Array(46 + nameBytes.length);
+    p = 0;
+    const cv = new DataView(central.buffer);
+    p = writeU32(cv, p, 0x02014b50);
+    p = writeU16(cv, p, 20);
+    p = writeU16(cv, p, 20);
+    p = writeU16(cv, p, 0x0800);
+    p = writeU16(cv, p, 0);
+    p = writeU16(cv, p, dosTime);
+    p = writeU16(cv, p, dosDate);
+    p = writeU32(cv, p, crc);
+    p = writeU32(cv, p, dataBytes.length);
+    p = writeU32(cv, p, dataBytes.length);
+    p = writeU16(cv, p, nameBytes.length);
+    p = writeU16(cv, p, 0);
+    p = writeU16(cv, p, 0);
+    p = writeU16(cv, p, 0);
+    p = writeU16(cv, p, 0);
+    p = writeU32(cv, p, 0);
+    p = writeU32(cv, p, offset);
+    central.set(nameBytes, p);
+    centrals.push(central);
+    offset += local.length + dataBytes.length;
+  });
+  const centralSize = centrals.reduce((sum, part) => sum + part.length, 0);
+  const end = new Uint8Array(22);
+  let p = 0;
+  const ev = new DataView(end.buffer);
+  p = writeU32(ev, p, 0x06054b50);
+  p = writeU16(ev, p, 0);
+  p = writeU16(ev, p, 0);
+  p = writeU16(ev, p, files.length);
+  p = writeU16(ev, p, files.length);
+  p = writeU32(ev, p, centralSize);
+  p = writeU32(ev, p, offset);
+  p = writeU16(ev, p, 0);
+  return new Blob([concatUint8Arrays([...locals, ...centrals, end])], { type: 'application/zip' });
+}
+async function exportTxt() {
   if (!requireAuth('请先登录后再导出数据')) return;
+  if (!(await syncLatestBeforeExport())) return;
   const user = currentUser();
+  if (!user) { page = 'auth'; render(); showToast('云端账号数据已更新，请重新登录后导出'); return; }
   const month = window.__selectedMonth || monthStr();
   if (isAdmin(user)) {
     const activeMembers = (state.members || []).filter(m => m.active !== false);
-    const parts = [];
-    activeMembers.forEach(m => {
+    const files = activeMembers.map(m => {
       const records = monthRecords(month, m.id);
-      if (!records.length) return;
-      parts.push(memberMonthlyTxt(m, month, records));
-    });
-    const content = parts.length ? parts.join('\n\n------------------------------\n\n') : '暂无业绩';
-    downloadFile(`所有人业绩_${month}.txt`, '\ufeff' + content, 'text/plain;charset=utf-8');
+      return records.length ? { name: `${safeFilename(m.name)}_${month}.txt`, content: '\ufeff' + memberMonthlyTxt(m, month, records) } : null;
+    }).filter(Boolean);
+    if (!files.length) { showToast(`${month} 暂无可导出的业绩`); return; }
+    const zipBlob = zipStoredBlob(files);
+    downloadBlob(`${month}全员业绩TXT.zip`, zipBlob);
+    showToast(`导出完成：导出人数 ${files.length}，TXT 文件数 ${files.length}，ZIP 文件大小 ${formatBytes(zipBlob.size)}`);
   } else {
     const m = memberById(user.memberId) || { name: user.displayName || user.username };
     const records = monthRecords(month, user.memberId);
-    downloadFile(`${safeFilename(m.name)}_${month}_业绩.txt`, '\ufeff' + memberMonthlyTxt(m, month, records), 'text/plain;charset=utf-8');
+    downloadFile(`${safeFilename(m.name)}_${month}.txt`, '\ufeff' + memberMonthlyTxt(m, month, records), 'text/plain;charset=utf-8');
+    showToast(`导出完成：${safeFilename(m.name)}_${month}.txt`);
   }
 }
 function exportExcel() {
