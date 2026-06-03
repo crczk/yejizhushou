@@ -269,15 +269,15 @@ function renderHeader() {
   const title = document.querySelector('.topbar h1');
   const syncBtn = document.getElementById('syncBtn');
   if (!eyebrow || !title || !syncBtn) return;
-  title.textContent = '业绩助手V7';
+  title.textContent = '业绩助手';
   if (!user) {
-    eyebrow.textContent = '账号登录 · 隔离版';
+    eyebrow.textContent = '账号登录 · 权限隔离版';
     syncBtn.style.display = 'none';
     return;
   }
   const roleText = isAdmin(user) ? '管理员' : '个人账号';
   eyebrow.textContent = `${safeHtml(user.displayName || user.username)} · ${roleText}`;
-  syncBtn.textContent = '上传同步';
+  syncBtn.textContent = '立即同步';
   syncBtn.style.display = '';
 }
 function render() {
@@ -315,27 +315,60 @@ function typeSelectOptions(selected = '', memberId = '', includePlaceholder = fa
   const placeholder = includePlaceholder ? `<option value="" disabled ${selected ? '' : 'selected'}>请选择业绩类型</option>` : '';
   return placeholder + list.map(t => `<option value="${t.id}" ${selected === t.id ? 'selected' : ''}>${safeHtml(t.name)}（${safeHtml(t.unit)}）</option>`).join('');
 }
+function cloudReady() { return !!(config.owner && config.repo && config.branch && config.path && config.token); }
+function cloudConfigTpl() {
+  return `<section class="card">
+    <div class="section-title"><h2>使用前先连接云端数据</h2><span class="pill">必填</span></div>
+    <p class="muted">请粘贴管理员提供的云端配置，保存并拉取成功后再登录或注册。登录和注册都会先校验云端数据库中的最新账号、密码和注册校验码。</p>
+    <div class="field"><label>一键粘贴导入</label><textarea id="cloudConfigPaste" placeholder="支持格式：
+用户名：xxx
+仓库名：xxx
+分支：master
+数据路径：data/performance.json
+私人令牌：xxxxx
+
+也支持 owner=xxx、repo=xxx、branch=xxx、path=xxx、token=xxx"></textarea></div>
+    <button id="importConfigBtn" class="ghost full" type="button">一键导入到下方表单</button>
+    <form id="preAuthConfigForm" class="mini-form">
+      <div class="grid">
+        <div class="field"><label>用户名/组织</label><input name="owner" value="${safeHtml(config.owner)}" placeholder="例如 zhangsan" required></div>
+        <div class="field"><label>仓库名</label><input name="repo" value="${safeHtml(config.repo)}" placeholder="例如 performance-data" required></div>
+      </div>
+      <div class="grid">
+        <div class="field"><label>分支</label><input name="branch" value="${safeHtml(config.branch || 'master')}" required></div>
+        <div class="field"><label>数据路径</label><input name="path" value="${safeHtml(config.path || 'data/performance.json')}" required></div>
+      </div>
+      <div class="field"><label>私人令牌</label><input name="token" type="password" value="${safeHtml(config.token)}" required></div>
+      <div class="row wrap">
+        <button class="primary" type="submit">保存并拉取云端数据</button>
+        <button id="testCloudBtn" class="soft" type="button">测试连接/拉取</button>
+      </div>
+    </form>
+  </section>`;
+}
 function authTpl() {
+  const ready = cloudReady();
   return `<section class="card hero auth-hero">
     <div class="auth-logo">业绩助手</div>
-    <h2>登录后使用业绩记录与云同步</h2>
-    <p>本工具仅作业绩数据统计使用</p>
+    <h2>登录前先连接云端数据库</h2>
+    <p>连接成功后，登录会使用云端最新账号数据；注册会使用管理员最新设置的注册校验码。</p>
   </section>
-  <section class="auth-grid">
+  ${cloudConfigTpl()}
+  <section class="auth-grid ${ready ? '' : 'disabled-auth'}">
     <form id="loginForm" class="card">
-      <div class="section-title"><h2>账号登录</h2><span class="pill">必填</span></div>
-      <div class="field"><label>账号</label><input name="username" autocomplete="username" placeholder="请输入账号" required></div>
-      <div class="field"><label>密码</label><input name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required></div>
-      <button class="primary full" type="submit">登录</button>
+      <div class="section-title"><h2>账号登录</h2><span class="pill">云端校验</span></div>
+      <div class="field"><label>账号</label><input name="username" autocomplete="username" placeholder="请输入账号" required ${ready ? '' : 'disabled'}></div>
+      <div class="field"><label>密码</label><input name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required ${ready ? '' : 'disabled'}></div>
+      <button class="primary full" type="submit" ${ready ? '' : 'disabled'}>登录</button>
     </form>
     <form id="registerForm" class="card">
-      <div class="section-title"><h2>注册个人账号</h2><span class="pill">个人数据</span></div>
-      <div class="field"><label>姓名</label><input name="displayName" placeholder="例如：张三" required></div>
-      <div class="field"><label>登录账号</label><input name="username" autocomplete="username" placeholder="建议使用姓名拼音或工号" required></div>
-      <div class="field"><label>密码</label><input name="password" type="password" autocomplete="new-password" minlength="4" placeholder="至少 4 位" required></div>
-      <div class="field"><label>确认密码</label><input name="confirmPassword" type="password" autocomplete="new-password" minlength="4" required></div>
-      <div class="field"><label>注册校验码</label><input name="registrationCode" placeholder="请输入管理员提供的校验码" required></div>
-      <button class="soft full" type="submit">注册并登录</button>
+      <div class="section-title"><h2>注册个人账号</h2><span class="pill">最新校验码</span></div>
+      <div class="field"><label>姓名</label><input name="displayName" placeholder="例如：张三" required ${ready ? '' : 'disabled'}></div>
+      <div class="field"><label>登录账号</label><input name="username" autocomplete="username" placeholder="建议使用姓名拼音或工号" required ${ready ? '' : 'disabled'}></div>
+      <div class="field"><label>密码</label><input name="password" type="password" autocomplete="new-password" minlength="4" placeholder="至少 4 位" required ${ready ? '' : 'disabled'}></div>
+      <div class="field"><label>确认密码</label><input name="confirmPassword" type="password" autocomplete="new-password" minlength="4" required ${ready ? '' : 'disabled'}></div>
+      <div class="field"><label>注册校验码</label><input name="registrationCode" placeholder="请输入管理员提供的最新校验码" required ${ready ? '' : 'disabled'}></div>
+      <button class="soft full" type="submit" ${ready ? '' : 'disabled'}>注册并登录</button>
     </form>
   </section>`;
 }
@@ -461,6 +494,12 @@ function settingsTpl() {
   </section>
   ${isAdmin(user) ? `<section class="card">
     <div class="section-title"><h2>yunduan 数据同步设置</h2><span class="pill">管理员管理</span></div>
+    <div class="field"><label>一键粘贴导入</label><textarea id="settingsCloudConfigPaste" placeholder="用户名：xxx
+仓库名：xxx
+分支：master
+数据路径：data/performance.json
+私人令牌：xxxxx"></textarea></div>
+    <button id="settingsImportConfigBtn" class="ghost full" type="button">一键导入到表单</button>
     <form id="configForm">
       <div class="grid">
         <div class="field"><label>yunduan 用户名/组织</label><input name="owner" value="${safeHtml(config.owner)}" placeholder="例如 zhangsan" required></div>
@@ -608,10 +647,102 @@ function singleTypeDailyTrend(month, typeId, memberId = currentMemberFilter()) {
   return `<div class="trend-head"><div><strong>${safeHtml(t.name)}</strong><div class="muted">本月合计：${formatValue(total, t.unit)}</div></div></div>
     <div class="chart scroll-chart">${values.map((v, i) => `<div class="bar" title="${i + 1}日 ${num(v)} ${safeHtml(t.unit)}" style="height:${v ? Math.max(5, v / max * 115) : 3}px; background:${t.color}">${v ? `<em>${num(v)}</em>` : ''}<span>${i + 1}</span></div>`).join('')}</div>`;
 }
+
+function parseCloudConfigText(text) {
+  const result = {};
+  const raw = String(text || '').trim();
+  if (!raw) return result;
+  try {
+    const json = JSON.parse(raw);
+    return {
+      owner: json.owner || json.username || json.user || json['用户名'] || json['用户名/组织'],
+      repo: json.repo || json.repository || json['仓库名'] || json['仓库'],
+      branch: json.branch || json['分支'],
+      path: json.path || json.filePath || json['数据路径'] || json['路径'],
+      token: json.token || json.access_token || json['私人令牌'] || json['令牌']
+    };
+  } catch {}
+  const aliases = {
+    owner: ['owner','username','user','用户名','用户名/组织','用户','组织'],
+    repo: ['repo','repository','仓库名','仓库'],
+    branch: ['branch','分支'],
+    path: ['path','filepath','file_path','数据路径','路径'],
+    token: ['token','access_token','私人令牌','令牌','access token']
+  };
+  raw.split(/\n|;|；/).forEach(line => {
+    const parts = line.split(/[:：=]/);
+    if (parts.length < 2) return;
+    const key = parts.shift().trim().toLowerCase();
+    const value = parts.join('=').trim();
+    Object.entries(aliases).forEach(([field, keys]) => {
+      if (keys.map(k => k.toLowerCase()).includes(key)) result[field] = value;
+    });
+  });
+  if (!Object.keys(result).length) {
+    const parts = raw.split(/[\s,，|]+/).map(x => x.trim()).filter(Boolean);
+    if (parts.length >= 5) [result.owner, result.repo, result.branch, result.path, result.token] = parts;
+  }
+  return result;
+}
+function fillConfigForm(form, data) {
+  ['owner','repo','branch','path','token'].forEach(k => {
+    if (data[k] && form?.elements?.[k]) form.elements[k].value = data[k];
+  });
+}
+function readConfigFromForm(form) {
+  const fd = new FormData(form);
+  return {
+    owner: String(fd.get('owner') || '').trim(),
+    repo: String(fd.get('repo') || '').trim(),
+    branch: String(fd.get('branch') || 'master').trim(),
+    path: String(fd.get('path') || 'data/performance.json').trim(),
+    token: String(fd.get('token') || '').trim()
+  };
+}
+async function pullRemoteForAuth() {
+  if (!cloudReady()) { showToast('请先填写并保存云端连接信息'); return false; }
+  try {
+    showToast('正在校验云端数据...');
+    const remote = await getRemoteFile();
+    if (!remote) {
+      showToast('云端尚无数据文件；管理员可登录后上传初始化数据');
+      return true;
+    }
+    state = normalizeData(remote.data);
+    saveLocal();
+    return true;
+  } catch (err) {
+    console.error(err);
+    showToast('云端连接失败，请检查配置、令牌和仓库权限');
+    return false;
+  }
+}
+async function saveThenPullPreAuth(form) {
+  config = readConfigFromForm(form);
+  saveConfig();
+  const ok = await pullRemoteForAuth();
+  render();
+  showToast(ok ? '云端连接成功，可以登录或注册' : '云端连接失败');
+}
 function bindAuthPage() {
+  const preAuthConfigForm = document.getElementById('preAuthConfigForm');
+  const importConfigBtn = document.getElementById('importConfigBtn');
+  const testCloudBtn = document.getElementById('testCloudBtn');
+  if (importConfigBtn) importConfigBtn.onclick = () => {
+    const parsed = parseCloudConfigText(document.getElementById('cloudConfigPaste')?.value || '');
+    fillConfigForm(preAuthConfigForm, parsed);
+    if (Object.keys(parsed).length) showToast('已导入，请检查后保存并拉取');
+    else showToast('未识别到配置，请按示例格式粘贴');
+  };
+  if (preAuthConfigForm) preAuthConfigForm.onsubmit = async e => { e.preventDefault(); await saveThenPullPreAuth(preAuthConfigForm); };
+  if (testCloudBtn) testCloudBtn.onclick = async () => { if (preAuthConfigForm) config = readConfigFromForm(preAuthConfigForm); saveConfig(); await pullRemoteForAuth(); render(); };
+
   const loginForm = document.getElementById('loginForm');
   if (loginForm) loginForm.onsubmit = async e => {
     e.preventDefault();
+    if (!cloudReady()) { showToast('请先连接云端数据'); return; }
+    const ok = await pullRemoteForAuth();
+    if (!ok) return;
     const fd = new FormData(loginForm);
     const username = normalizeUsername(fd.get('username'));
     const passwordHash = await hashPassword(fd.get('password'));
@@ -622,11 +753,14 @@ function bindAuthPage() {
     saveSession(user);
     page = 'home';
     render();
-    showToast('登录成功');
+    showToast('登录成功，已使用云端最新数据');
   };
   const registerForm = document.getElementById('registerForm');
   if (registerForm) registerForm.onsubmit = async e => {
     e.preventDefault();
+    if (!cloudReady()) { showToast('请先连接云端数据'); return; }
+    const ok = await pullRemoteForAuth();
+    if (!ok) return;
     const fd = new FormData(registerForm);
     const displayName = String(fd.get('displayName') || '').trim();
     const username = normalizeUsername(fd.get('username'));
@@ -635,7 +769,7 @@ function bindAuthPage() {
     const inputCode = String(fd.get('registrationCode') || '').trim();
     const requiredCode = String(state.registrationCode || '').trim();
     if (!requiredCode) { showToast('管理员尚未设置注册校验码，请联系管理员'); return; }
-    if (inputCode !== requiredCode) { showToast('注册校验码不正确'); return; }
+    if (inputCode !== requiredCode) { showToast('注册校验码不正确，请使用管理员最新设置的校验码'); return; }
     if (!displayName || !username) { showToast('请填写姓名和账号'); return; }
     if (password.length < 4) { showToast('密码至少 4 位'); return; }
     if (password !== confirmPassword) { showToast('两次密码不一致'); return; }
@@ -656,9 +790,10 @@ function bindAuthPage() {
     state.members.push({ id: memberId, name: displayName, role: '成员', active: true, createdAt: now });
     saveLocal();
     saveSession(user);
+    await pushToYunduan(false);
     page = 'home';
     render();
-    showToast('注册成功，已登录');
+    showToast('注册成功，已同步云端');
   };
 }
 function bindPage() {
@@ -788,9 +923,24 @@ function bindPage() {
   const logoutBtn = document.getElementById('logoutBtn');
   if (logoutBtn) logoutBtn.onclick = () => { clearSession(); page = 'auth'; render(); showToast('已退出登录'); };
   const configForm = document.getElementById('configForm');
-  if (configForm) configForm.onsubmit = e => { e.preventDefault(); const fd = new FormData(configForm); config = Object.fromEntries(fd.entries()); saveConfig(); showToast('同步设置已保存'); };
+  if (configForm) configForm.onsubmit = e => { e.preventDefault(); config = readConfigFromForm(configForm); saveConfig(); showToast('同步设置已保存'); };
+  const settingsImportConfigBtn = document.getElementById('settingsImportConfigBtn');
+  if (settingsImportConfigBtn) settingsImportConfigBtn.onclick = () => { const parsed = parseCloudConfigText(document.getElementById('settingsCloudConfigPaste')?.value || ''); fillConfigForm(configForm, parsed); showToast(Object.keys(parsed).length ? '已导入，请检查后保存' : '未识别到配置'); };
   const registrationCodeForm = document.getElementById('registrationCodeForm');
-  if (registrationCodeForm) registrationCodeForm.onsubmit = e => { e.preventDefault(); const fd = new FormData(registrationCodeForm); state.registrationCode = String(fd.get('registrationCode') || '').trim(); if (!state.registrationCode) { showToast('注册校验码不能为空'); return; } saveLocal(); render(); showToast('注册校验码已保存'); };
+  if (registrationCodeForm) registrationCodeForm.onsubmit = async e => {
+    e.preventDefault();
+    const fd = new FormData(registrationCodeForm);
+    const nextCode = String(fd.get('registrationCode') || '').trim();
+    if (!nextCode) { showToast('注册校验码不能为空'); return; }
+    try {
+      if (cloudReady()) { const remote = await getRemoteFile(); if (remote?.data) state = normalizeData(remote.data); }
+    } catch (err) { console.error(err); showToast('读取云端失败，未保存校验码'); return; }
+    state.registrationCode = nextCode;
+    saveLocal();
+    await pushToYunduan(false);
+    render();
+    showToast('注册校验码已保存并同步云端');
+  };
   const pullBtn = document.getElementById('pullBtn');
   if (pullBtn) pullBtn.onclick = pullFromYunduan;
   const pushBtn = document.getElementById('pushBtn');
@@ -892,11 +1042,11 @@ async function pullFromYunduan() {
     showToast('已从 yunduan 同步到本机');
   } catch (err) { console.error(err); showToast('拉取失败：请检查 Token、仓库、分支或跨域限制'); }
 }
-async function pushToYunduan() {
-  if (!requireAuth('请先登录后再上传数据')) return;
-  if (!checkConfig()) return;
+async function pushToYunduan(showMessages = true) {
+  if (!requireAuth('请先登录后再上传数据')) return false;
+  if (!checkConfig()) return false;
   try {
-    showToast('正在上传到 yunduan...');
+    if (showMessages) showToast('正在上传到 yunduan...');
     const user = currentUser();
     let sha = '';
     let uploadState = state;
@@ -921,8 +1071,9 @@ async function pushToYunduan() {
     if (!res.ok) throw new Error(await res.text());
     const json = await res.json(); remoteSha = json.content?.sha || json.sha || '';
     if (!isAdmin(user)) { state = uploadState; saveLocal(); }
-    showToast('已上传到 yunduan');
-  } catch (err) { console.error(err); showToast('上传失败：请检查仓库权限、路径或 Token'); }
+    if (showMessages) showToast('已上传到 yunduan');
+    return true;
+  } catch (err) { console.error(err); showToast('上传失败：请检查仓库权限、路径或 Token'); return false; }
 }
 function normalizeData(d = {}) {
   const base = defaultData();
