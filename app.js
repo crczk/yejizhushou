@@ -550,6 +550,7 @@ function settingsTpl() {
     <div class="row wrap">
       <button id="exportExcelBtn" class="ghost">导出 Excel</button>
       <button id="exportCsvBtn" class="ghost">导出 CSV</button>
+      <button id="exportTxtBtn" class="ghost">${isAdmin(user) ? '导出所有人 TXT' : '导出我的 TXT'}</button>
       <button id="clearBtn" class="danger">${isAdmin(user) ? '清空全部记录' : '清空我的记录'}</button>
     </div>
   </section>`;
@@ -949,6 +950,8 @@ function bindPage() {
   if (exportExcelBtn) exportExcelBtn.onclick = exportExcel;
   const exportCsvBtn = document.getElementById('exportCsvBtn');
   if (exportCsvBtn) exportCsvBtn.onclick = exportCsv;
+  const exportTxtBtn = document.getElementById('exportTxtBtn');
+  if (exportTxtBtn) exportTxtBtn.onclick = exportTxt;
   const clearBtn = document.getElementById('clearBtn');
   if (clearBtn) clearBtn.onclick = () => {
     if (!requireAuth()) return;
@@ -1157,6 +1160,50 @@ function downloadFile(filename, content, type) {
 }
 function excelCell(v) {
   return safeHtml(v ?? '');
+}
+function txtUnitSuffix(unit) {
+  const u = String(unit || '').trim();
+  const map = { '万': 'w', '万元': 'w', '克': 'g', '个': '个', '张': '张', '户': '户', '笔': '笔' };
+  return map[u] ?? u;
+}
+function formatTxtNumber(value) {
+  const n = Number(value || 0);
+  if (Number.isInteger(n)) return String(n);
+  return String(Math.round(n * 100) / 100).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1');
+}
+function memberMonthlyTxt(member, month, records) {
+  const summary = typeSummary(records).filter(x => Number(x.value || 0) !== 0);
+  const name = member?.name || member?.displayName || member?.username || '未命名';
+  const lines = [`姓名：${name}`, '业绩：'];
+  if (summary.length) {
+    summary.forEach(x => lines.push(`${x.type.name}${formatTxtNumber(x.value)}${txtUnitSuffix(x.type.unit)}`));
+  } else {
+    lines.push('暂无业绩');
+  }
+  return lines.join('\n');
+}
+function safeFilename(name) {
+  return String(name || '未命名').replace(/[\\/:*?"<>|\s]+/g, '_').replace(/^_+|_+$/g, '') || '未命名';
+}
+function exportTxt() {
+  if (!requireAuth('请先登录后再导出数据')) return;
+  const user = currentUser();
+  const month = window.__selectedMonth || monthStr();
+  if (isAdmin(user)) {
+    const activeMembers = (state.members || []).filter(m => m.active !== false);
+    const parts = [];
+    activeMembers.forEach(m => {
+      const records = monthRecords(month, m.id);
+      if (!records.length) return;
+      parts.push(memberMonthlyTxt(m, month, records));
+    });
+    const content = parts.length ? parts.join('\n\n------------------------------\n\n') : '暂无业绩';
+    downloadFile(`所有人业绩_${month}.txt`, '\ufeff' + content, 'text/plain;charset=utf-8');
+  } else {
+    const m = memberById(user.memberId) || { name: user.displayName || user.username };
+    const records = monthRecords(month, user.memberId);
+    downloadFile(`${safeFilename(m.name)}_${month}_业绩.txt`, '\ufeff' + memberMonthlyTxt(m, month, records), 'text/plain;charset=utf-8');
+  }
 }
 function exportExcel() {
   if (!requireAuth('请先登录后再导出数据')) return;
