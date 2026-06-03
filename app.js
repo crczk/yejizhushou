@@ -324,14 +324,14 @@ function cloudConfigTpl() {
     <button id="importConfigBtn" class="ghost full" type="button">一键导入到下方表单</button>
     <form id="preAuthConfigForm" class="mini-form">
       <div class="grid">
-        <div class="field"><label>组织</label><input name="owner" value="${safeHtml(config.owner)}" placeholder="例如 zhangsan" required></div>
-        <div class="field"><label>仓库</label><input name="repo" value="${safeHtml(config.repo)}" placeholder="例如 performance-data" required></div>
+        <div class="field"><label>owner</label><input name="owner" value="${safeHtml(config.owner)}" placeholder="例如 zhangsan" required></div>
+        <div class="field"><label>repo</label><input name="repo" value="${safeHtml(config.repo)}" placeholder="例如 performance-data" required></div>
       </div>
       <div class="grid">
-        <div class="field"><label>分支</label><input name="branch" value="${safeHtml(config.branch || 'master')}" required></div>
-        <div class="field"><label>路径</label><input name="path" value="${safeHtml(config.path || 'data/performance.json')}" required></div>
+        <div class="field"><label>branch</label><input name="branch" value="${safeHtml(config.branch || 'master')}" required></div>
+        <div class="field"><label>path</label><input name="path" value="${safeHtml(config.path || 'data/performance.json')}" required></div>
       </div>
-      <div class="field"><label>令牌</label><input name="token" type="password" value="${safeHtml(config.token)}" required></div>
+      <div class="field"><label>Token</label><input name="token" type="password" value="${safeHtml(config.token)}" required></div>
       <div class="row wrap">
         <button class="primary" type="submit">保存并拉取云端数据</button>
         <button id="testCloudBtn" class="soft" type="button">测试连接/拉取</button>
