@@ -319,26 +319,19 @@ function cloudReady() { return !!(config.owner && config.repo && config.branch &
 function cloudConfigTpl() {
   return `<section class="card">
     <div class="section-title"><h2>使用前先连接云端数据</h2><span class="pill">必填</span></div>
-    <p class="muted">请粘贴管理员提供的云端配置，保存并拉取成功后再登录或注册。登录和注册都会先校验云端数据库中的最新账号、密码和注册校验码。</p>
-    <div class="field"><label>一键粘贴导入</label><textarea id="cloudConfigPaste" placeholder="支持格式：
-用户名：xxx
-仓库名：xxx
-分支：master
-数据路径：data/performance.json
-私人令牌：xxxxx
-
-也支持 owner=xxx、repo=xxx、branch=xxx、path=xxx、token=xxx"></textarea></div>
+    <p class="muted">请粘贴管理员提供的云端配置，保存并拉取成功后再登录或注册。</p>
+    <div class="field"><label>一键粘贴导入</label><textarea id="cloudConfigPaste" placeholder="owner=xxx、repo=xxx、branch=xxx、path=xxx、token=xxx"></textarea></div>
     <button id="importConfigBtn" class="ghost full" type="button">一键导入到下方表单</button>
     <form id="preAuthConfigForm" class="mini-form">
       <div class="grid">
-        <div class="field"><label>用户名/组织</label><input name="owner" value="${safeHtml(config.owner)}" placeholder="例如 zhangsan" required></div>
-        <div class="field"><label>仓库名</label><input name="repo" value="${safeHtml(config.repo)}" placeholder="例如 performance-data" required></div>
+        <div class="field"><label>组织</label><input name="owner" value="${safeHtml(config.owner)}" placeholder="例如 zhangsan" required></div>
+        <div class="field"><label>仓库</label><input name="repo" value="${safeHtml(config.repo)}" placeholder="例如 performance-data" required></div>
       </div>
       <div class="grid">
         <div class="field"><label>分支</label><input name="branch" value="${safeHtml(config.branch || 'master')}" required></div>
-        <div class="field"><label>数据路径</label><input name="path" value="${safeHtml(config.path || 'data/performance.json')}" required></div>
+        <div class="field"><label>路径</label><input name="path" value="${safeHtml(config.path || 'data/performance.json')}" required></div>
       </div>
-      <div class="field"><label>私人令牌</label><input name="token" type="password" value="${safeHtml(config.token)}" required></div>
+      <div class="field"><label>令牌</label><input name="token" type="password" value="${safeHtml(config.token)}" required></div>
       <div class="row wrap">
         <button class="primary" type="submit">保存并拉取云端数据</button>
         <button id="testCloudBtn" class="soft" type="button">测试连接/拉取</button>
@@ -351,7 +344,7 @@ function authTpl() {
   return `<section class="card hero auth-hero">
     <div class="auth-logo">业绩助手-v11</div>
     <h2>登录前先连接云端数据库</h2>
-    <p>连接成功后，登录会使用云端最新账号数据；注册会使用管理员最新设置的注册校验码。</p>
+    <p>连接成功后，登录会校验账号数据；注册会校验注册校验码。</p>
   </section>
   ${cloudConfigTpl()}
   <section class="auth-grid ${ready ? '' : 'disabled-auth'}">
