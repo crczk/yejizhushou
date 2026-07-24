@@ -1,0 +1,46 @@
+{
+  "version": 10,
+  "syncMode": "split-user-files-v1",
+  "directoryExample": "data/performance-v14",
+  "files": {
+    "public.json": {
+      "registrationCode": "123456",
+      "settings": { "amountVisibility": "all" },
+      "users": [],
+      "members": [],
+      "deletedUsers": [],
+      "deletedMembers": [],
+      "globalTypes": [],
+      "coreSummaries": [],
+      "updatedAt": "2026-07-23T00:00:00.000Z"
+    },
+    "pricing.json": {
+      "prices": {
+        "type_example": {
+          "price": 10,
+          "pricingUpdatedAt": "2026-07-23T00:00:00.000Z",
+          "pricingUpdatedBy": "user_admin"
+        }
+      },
+      "updatedAt": "2026-07-23T00:00:00.000Z",
+      "updatedBy": "user_admin"
+    },
+    "users/user_id.json": {
+      "userId": "user_id",
+      "memberId": "member_id",
+      "personalTypes": [],
+      "records": [],
+      "deletedRecords": [],
+      "updatedAt": "2026-07-23T00:00:00.000Z"
+    }
+  },
+  "deletionModes": {
+    "account_only": "删除登录账号，成员与历史业绩迁移至 memberfile_成员编号.json",
+    "account_and_data": "删除账号、成员、个人类别、业绩记录及对应云端文件"
+  },
+  "amountVisibilityValues": {
+    "all": "普通用户可查看全部公开金额",
+    "own": "普通用户只查看本人金额",
+    "hidden": "普通用户不显示金额且不拉取 pricing.json"
+  }
+}
