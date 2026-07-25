@@ -1,5 +1,5 @@
-const CACHE_NAME = 'performance-yunduan-webapp-v21-single-device';
-const ASSETS = ['./', './index.html', './styles.css', './cloud-config.js', './app.js', './manifest.webmanifest', './icon.svg'];
+const CACHE_NAME = 'performance-yunduan-webapp-v29-performance-share';
+const ASSETS = ['./', './index.html', './styles.css', './cloud-config.js', './app.js', './manifest.webmanifest', './icon.svg', './version-v29.txt'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)));
   self.skipWaiting();

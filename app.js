@@ -6,7 +6,13 @@ const DEVICE_KEY = 'bank-performance-yunduan-device-v1';
 const PENDING_SESSION_RELEASE_KEY = 'bank-performance-yunduan-pending-session-release-v1';
 const REMOTE_SESSION_TTL_MS = 30 * 60 * 1000;
 const REMOTE_SESSION_TOUCH_INTERVAL_MS = 8 * 60 * 1000;
-const APP_VERSION = '21.0';
+const APP_VERSION = '29.0';
+try {
+  if (window.AndroidBridge || window.Android) document.documentElement.classList.add('native-android');
+  if (new URLSearchParams(location.search).get('desktop') === 'windows') document.documentElement.classList.add('native-windows');
+} catch (err) { console.error(err); }
+
+const REMINDER_SETTINGS_KEY = 'bank-performance-daily-reminder-v1';
 const SYNC_META_KEY = 'bank-performance-yunduan-sync-meta-v2';
 const API_ROOT = 'https://gitee.com/api/v5';
 const PACKAGE_CLOUD_CONFIG = Object.freeze(window.__PERFORMANCE_CLOUD_CONFIG__ || {});
@@ -78,7 +84,7 @@ function getDeviceId() {
 }
 function deviceLabel() {
   const ua = String(navigator.userAgent || '');
-  const platform = /Android/i.test(ua) ? 'Android设备' : /iPhone|iPad|iPod/i.test(ua) ? 'iOS设备' : '网页设备';
+  const platform = /Android/i.test(ua) ? 'Android设备' : /iPhone|iPad|iPod/i.test(ua) ? 'iOS设备' : document.documentElement.classList.contains('native-windows') ? 'Windows设备' : '网页设备';
   return `${platform}-${getDeviceId().slice(-6).toUpperCase()}`;
 }
 function dateMs(value) {
@@ -86,6 +92,141 @@ function dateMs(value) {
   return Number.isFinite(ms) ? ms : 0;
 }
 function pad2(n) { return String(n).padStart(2, '0'); }
+function nativeBridge() { return window.AndroidBridge || window.Android || null; }
+function loadReminderSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(REMINDER_SETTINGS_KEY) || '{}');
+    const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(saved.time || '')) ? String(saved.time) : '20:00';
+    return { enabled: saved.enabled === true, time };
+  } catch {
+    return { enabled: false, time: '20:00' };
+  }
+}
+let reminderSettings = loadReminderSettings();
+let browserReminderTimer = null;
+function saveReminderSettings(settings) {
+  reminderSettings = { enabled: settings.enabled === true, time: settings.time || '20:00' };
+  localStorage.setItem(REMINDER_SETTINGS_KEY, JSON.stringify(reminderSettings));
+}
+function hasNativeReminder() {
+  const bridge = nativeBridge();
+  return !!bridge && typeof bridge.setDailyReminder === 'function';
+}
+function reminderTimeParts(value = reminderSettings.time) {
+  const matched = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(value || ''));
+  return matched ? { hour: Number(matched[1]), minute: Number(matched[2]) } : { hour: 20, minute: 0 };
+}
+let nativeReminderStatus = null;
+function readNativeReminderStatus() {
+  const bridge = nativeBridge();
+  if (!bridge || typeof bridge.getReminderStatus !== 'function') return null;
+  try {
+    const value = bridge.getReminderStatus();
+    nativeReminderStatus = typeof value === 'string' ? JSON.parse(value) : value;
+    return nativeReminderStatus;
+  } catch (err) {
+    console.error(err);
+    return null;
+  }
+}
+function applyNativeReminder(settings = reminderSettings) {
+  const bridge = nativeBridge();
+  if (!bridge || typeof bridge.setDailyReminder !== 'function') return false;
+  const { hour, minute } = reminderTimeParts(settings.time);
+  try {
+    const value = bridge.setDailyReminder(!!settings.enabled, hour, minute);
+    if (typeof value === 'string' && value.trim()) nativeReminderStatus = JSON.parse(value);
+    else readNativeReminderStatus();
+    return true;
+  } catch (err) {
+    console.error(err);
+    return false;
+  }
+}
+function formatReminderDateTime(value) {
+  const ms = Number(value || 0);
+  if (!ms) return '尚未安排';
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return '尚未安排';
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+function reminderStatusText(value) {
+  const map = {
+    none: '暂无记录',
+    sent_alarm: '系统闹钟已成功发送',
+    sent_backup_job: '备用后台任务已成功发送',
+    sent_test_alarm: '后台测试已成功发送',
+    blocked_alarm: '系统闹钟已触发，但通知权限被阻止',
+    blocked_backup_job: '备用任务已触发，但通知权限被阻止',
+    blocked_test_alarm: '后台测试已触发，但通知权限被阻止'
+  };
+  return map[String(value || '')] || String(value || '暂无记录').replaceAll('_', ' ');
+}
+function nativeReminderStatusTpl() {
+  if (!hasNativeReminder()) return '';
+  const status = nativeReminderStatus || readNativeReminderStatus() || {};
+  const exact = status.exactAlarmAllowed === true;
+  const notify = status.notificationAllowed === true;
+  const battery = status.batteryExempt === true;
+  const mode = String(status.scheduleMode || 'none');
+  return `<div class="reminder-status-panel">
+    <div class="reminder-status-title"><strong>系统提醒状态</strong><span class="status-pill ${notify && exact ? 'ok' : 'warn'}">${notify && exact ? '可按时提醒' : '需要检查权限'}</span></div>
+    <div class="reminder-status-grid">
+      <span>通知权限</span><strong class="${notify ? 'status-ok' : 'status-warn'}">${notify ? '已允许' : '未允许'}</strong>
+      <span>精确定时</span><strong class="${exact ? 'status-ok' : 'status-warn'}">${exact ? '已允许' : '未允许，可能延迟'}</strong>
+      <span>后台电池策略</span><strong class="${battery ? 'status-ok' : 'status-warn'}">${battery ? '已设为不受限制' : '系统优化中，建议允许后台'}</strong>
+      <span>下次计划</span><strong>${safeHtml(formatReminderDateTime(status.nextTrigger))}</strong>
+      <span>调度方式</span><strong>${safeHtml(mode)}</strong>
+      <span>最近一次结果</span><strong>${safeHtml(reminderStatusText(status.lastResult))}</strong>
+    </div>
+  </div>`;
+}
+window.refreshReminderStatusFromNative = () => {
+  readNativeReminderStatus();
+  if (page === 'settings') render();
+};
+async function showBrowserReminder() {
+  if (!('Notification' in window)) return false;
+  try {
+    let permission = Notification.permission;
+    if (permission === 'default') permission = await Notification.requestPermission();
+    if (permission !== 'granted') return false;
+    const notification = new Notification('业绩录入提醒', {
+      body: '请及时录入今天的业绩信息。',
+      icon: './icon.svg',
+      tag: 'performance-daily-reminder'
+    });
+    notification.onclick = () => { window.focus(); window.openPerformanceEntryFromNotification?.(); notification.close(); };
+    return true;
+  } catch (err) {
+    console.error(err);
+    return false;
+  }
+}
+function scheduleBrowserReminderLoop() {
+  clearTimeout(browserReminderTimer);
+  browserReminderTimer = null;
+  if (hasNativeReminder() || !reminderSettings.enabled) return;
+  const { hour, minute } = reminderTimeParts();
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(hour, minute, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  const delay = Math.min(next.getTime() - now.getTime(), 2147483000);
+  browserReminderTimer = setTimeout(async () => {
+    await showBrowserReminder();
+    scheduleBrowserReminderLoop();
+  }, delay);
+}
+function reminderPlatformHint() {
+  if (hasNativeReminder()) {
+    return 'Android 系统会在应用关闭后继续按时发送任务栏通知；请允许通知权限，并避免系统管家禁止本应用后台提醒。';
+  }
+  if (document.documentElement.classList.contains('native-windows')) {
+    return 'Windows 桌面版在软件窗口保持运行时发送系统通知；关闭软件后不会继续后台提醒。首次测试时请允许 Microsoft Edge 通知权限。';
+  }
+  return '网页端仅在页面保持打开时尝试提醒；关闭浏览器后的可靠任务栏通知需要使用 Android APK。';
+}
 function todayStr(d = new Date()) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
 function monthStr(d = new Date()) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`; }
 function num(n) { return Number(n || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 }); }
@@ -731,6 +872,7 @@ function monthTpl() {
   const modules = [
     { id: 'overview', icon: '概览', title: '月度概览', desc: '选择月份和成员并查看总业绩' },
     { id: 'chart', icon: '排行', title: '类型月度对比', desc: '对比不同业绩的月总价或数量' },
+    { id: 'distribution', icon: '占比', title: '业绩占比分布', desc: '查看各项业绩价格占当月总价格的比例' },
     { id: 'trend', icon: '趋势', title: '单项每日趋势', desc: '查看某一业绩类型每日变化' },
     { id: 'summary', icon: '汇总', title: '单项业绩汇总', desc: '查看每种业绩数量与总价' },
     ...(isAdmin() ? [{ id: 'members', icon: '成员', title: '成员月度明细', desc: '查看每位成员月度价格明细' }] : [])
@@ -742,12 +884,13 @@ function monthTpl() {
     <div class="muted" style="margin-top:6px">共 ${recs.length} 笔；${showAmount ? '金额按各业绩类型当前单价实时计算，后补定价会自动回算。' : amountVisibilityLabel() + '。'}</div>
     <div style="margin-top:10px">${pricingHint(recs)}</div>`, month);
   const chart = moduleCardTpl('month', 'chart', `不同业绩月${showAmount ? '总价格' : '总数量'}`, typeBarChart(typeItems), showAmount ? '同时显示数量与总价' : '按业绩数量展示');
+  const distribution = moduleCardTpl('month', 'distribution', '业绩占比分布', performanceShareDistribution(typeItems, recs), amountVisibilityMode() === 'hidden' ? '金额已隐藏，仅展示占比' : '按当月业绩价格计算');
   const trend = moduleCardTpl('month', 'trend', '单项业绩每日趋势', `
     <div class="module-toolbar"><select id="trendTypePicker" class="compact-select">${isAdmin() && memberId === 'all' ? typeSelectOptions(selectedType, '', true) : typeSelectOptions(selectedType, memberId, true)}</select></div>
     ${availableTrendTypes.length ? singleTypeDailyTrend(month, selectedType, memberId) : '<div class="empty">请先新增业绩类型</div>'}`, month);
   const summary = moduleCardTpl('month', 'summary', `本月单项业绩数量${showAmount ? '与总价' : ''}`, summaryList(typeItems, true), month);
   const members = isAdmin() ? moduleCardTpl('month', 'members', '每位成员月度业绩价格明细', memberPricingBreakdown(recs, '本月'), '管理员视图') : '';
-  return `${hub}${overview}${chart}${trend}${summary}${members}`;
+  return `${hub}${overview}${chart}${distribution}${trend}${summary}${members}`;
 }
 function settingsTpl() {
   const user = currentUser();
@@ -763,8 +906,9 @@ function settingsTpl() {
     ...(admin ? [{ id: 'members', icon: '成员', title: '成员管理', desc: '新增或维护成员资料' }] : []),
     { id: 'types', icon: '类别', title: admin ? '业绩类型与定价' : '我的业绩类型', desc: admin ? '定价并将个人类别转为公共类别' : '新增和查看个人可用类别' },
     ...(admin ? [{ id: 'core', icon: '核心', title: '核心汇总管理', desc: '维护首页核心汇总大类' }] : []),
+    { id: 'reminder', icon: '提醒', title: '每日录入提醒', desc: '设置每天晚上的任务栏通知时间' },
     { id: 'tools', icon: '工具', title: toolsTitle, desc: '导出数据或清理有权限的记录' },
-    { id: 'about', icon: '关于', title: '关于该应用程序', desc: '查看作者、联系方式和使用说明' }
+    { id: 'about', icon: '关于', title: '关于该应用程序', desc: '查看开发者、版本信息和使用说明' }
   ];
   const hub = moduleHubTpl('settings', '我的功能', modules, '从下拉框选择设置或管理功能，选中后只在下方显示对应板块。');
   const account = moduleCardTpl('settings', 'account', '当前账号', `
@@ -786,15 +930,28 @@ function settingsTpl() {
     <div class="row wrap module-toolbar"><p class="muted">${admin ? '可为公共类型和个人类型定价；个人类型可直接转为所有成员可用的公共类型。转换后原有记录不会丢失。' : '新增名称时会先匹配公共类型；同名公共类型存在时直接使用。'}</p><button id="addTypeBtn" class="ghost small">${admin ? '新增公共类型' : '新增个人类型'}</button></div>
     <div class="list">${visibleTypes(user).map(typeItem).join('') || `<div class="empty">${admin ? '暂无业绩类型' : '暂无业绩类型，可点击新增类型'}</div>`}</div>`);
   const core = admin ? moduleCardTpl('settings', 'core', '业绩核心汇总管理', `<p class="muted">添加首页展示的大类并勾选包含的业绩类型。所有成员可按日期查看。</p>${coreSummaryManagementTpl()}`, '仅管理员维护') : '';
+  const reminder = moduleCardTpl('settings', 'reminder', '每日业绩录入提醒', `
+    <p class="muted">开启后，每天到达设置时间时提醒当前设备用户录入当天业绩。本设置只保存在本机，不上传云端。</p>
+    <form id="reminderForm" class="reminder-form">
+      <label class="reminder-switch-row"><span><strong>启用每日提醒</strong><small>${reminderSettings.enabled ? `当前已启用，每天 ${safeHtml(reminderSettings.time)} 提醒` : '当前未启用'}</small></span><input name="enabled" type="checkbox" ${reminderSettings.enabled ? 'checked' : ''}></label>
+      <div class="field"><label>提醒时间</label><input name="time" type="time" value="${safeHtml(reminderSettings.time)}" required></div>
+      <button class="primary full" type="submit">保存提醒设置</button>
+    </form>
+    ${nativeReminderStatusTpl()}
+    <div class="row wrap reminder-actions">
+      <button id="testReminderBtn" class="ghost small" type="button">立即发送测试通知</button>
+      ${hasNativeReminder() ? '<button id="backgroundTestReminderBtn" class="ghost small" type="button">1 分钟后后台测试</button><button id="notificationSettingsBtn" class="ghost small" type="button">通知设置</button><button id="alarmSettingsBtn" class="ghost small" type="button">精确定时设置</button><button id="batterySettingsBtn" class="ghost small" type="button">后台与电池设置</button>' : ''}
+    </div>
+    <div class="field-hint">${safeHtml(reminderPlatformHint())}</div>`, '本机设置');
   const tools = moduleCardTpl('settings', 'tools', toolsTitle, `<div class="row wrap"><button id="exportMonthlySummaryBtn" class="primary" style="${admin ? '' : 'display:none'}">导出当月全员汇总 XLSX</button><button id="exportExcelBtn" class="ghost">导出原有明细 Excel</button><button id="exportCsvBtn" class="ghost">导出 CSV</button><button id="exportTxtBtn" class="ghost">${admin ? '导出所有人 TXT' : '导出我的 TXT'}</button><button id="clearBtn" class="danger">${admin ? '清空全部记录' : '清空我的记录'}</button></div>`);
   const about = moduleCardTpl('settings', 'about', '关于该应用程序', `
     <div class="about-app">
-      <div class="about-app-row"><span>作者</span><strong>崔子坤</strong></div>
+      <div class="about-app-row"><span>开发者</span><strong>崔子坤</strong></div>
       <div class="about-app-row"><span>联系方式</span><strong>19836803588</strong></div>
       <div class="about-app-row"><span>当前版本</span><strong>${APP_VERSION}</strong></div>
       <p>该软件仅限内部人员提供便利使用，不作任何商业用途使用，欢迎交流学习。</p>
     </div>`, '内部使用');
-  return `${hub}${account}${sync}${amount}${cloud}${registration}${users}${members}${types}${core}${tools}${about}`;
+  return `${hub}${account}${sync}${amount}${cloud}${registration}${users}${members}${types}${core}${reminder}${tools}${about}`;
 }
 function coreSummaryManagementTpl() {
   const editingId = window.__editingCoreSummaryId || '';
@@ -814,6 +971,59 @@ function coreSummaryManagementTpl() {
 function coreSummaryAdminItem(group) {
   const types = (group.typeIds || []).map(typeById).filter(Boolean);
   return `<div class="item"><div style="flex:1"><div class="item-title">${safeHtml(group.name)} ${group.active === false ? '<span class="pill mini danger-pill">已停用</span>' : ''}</div><div class="item-sub">${types.length ? types.map(t => safeHtml(t.name)).join('、') : '尚未选择业绩类型'}</div></div><div class="row wrap"><button class="ghost small" data-edit-core-summary="${group.id}">编辑</button><button class="soft small" data-toggle-core-summary="${group.id}">${group.active === false ? '启用' : '停用'}</button><button class="danger small" data-delete-core-summary="${group.id}">删除</button></div></div>`;
+}
+function percentLabel(value) {
+  const fixed = (Math.round(Number(value || 0) * 100) / 100).toFixed(2);
+  return `${fixed.replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')}%`;
+}
+function performanceShareRows(items) {
+  const rows = (items || []).map((item, index) => {
+    const priced = typePrice(item.type) !== null;
+    const amount = priced ? Math.max(0, Number(item.totalPrice || 0)) : 0;
+    return { ...item, priced, amount, shareBasisPoints: 0, sourceIndex: index };
+  });
+  const total = rows.reduce((sum, row) => sum + row.amount, 0);
+  if (total <= 0) return { rows, total, calculable: false };
+  let assigned = 0;
+  const remainders = [];
+  rows.forEach((row, index) => {
+    const exact = row.amount / total * 10000;
+    const floorValue = Math.floor(exact);
+    row.shareBasisPoints = floorValue;
+    assigned += floorValue;
+    remainders.push({ index, remainder: exact - floorValue, amount: row.amount });
+  });
+  remainders.sort((a, b) => b.remainder - a.remainder || b.amount - a.amount || a.index - b.index);
+  for (let i = 0; i < 10000 - assigned; i += 1) rows[remainders[i % remainders.length].index].shareBasisPoints += 1;
+  return { rows, total, calculable: true };
+}
+function performanceShareDistribution(items, records) {
+  if (!items.length) return '<div class="empty">本月暂无业绩，暂不能生成占比分布</div>';
+  const result = performanceShareRows(items);
+  const showMoney = amountVisibilityMode() !== 'hidden' && canViewAggregateAmounts(records);
+  const unpricedItems = result.rows.filter(row => !row.priced).length;
+  const zeroAmountItems = result.rows.filter(row => row.priced && row.amount <= 0).length;
+  const totalHeadline = showMoney
+    ? `<span>当月业绩总价格</span><strong>${money(result.total)}</strong>`
+    : `<span>当月总占比</span><strong>${result.calculable ? '100%' : '暂未形成'}</strong>`;
+  const notice = !result.calculable
+    ? '<div class="share-notice warning-pill">当前没有大于 0 元的已定价业绩，暂无法按价格分配占比。</div>'
+    : `${unpricedItems ? `<div class="share-notice warning-pill">${unpricedItems} 项业绩尚未定价，暂不计入占比；管理员定价后将自动回算。</div>` : ''}${zeroAmountItems ? `<div class="share-notice">${zeroAmountItems} 项已定价业绩当月价格为 0 元，占比记为 0%。</div>` : ''}`;
+  const stacked = result.calculable ? `<div class="share-stack" aria-label="业绩占比总览">${result.rows.filter(row => row.shareBasisPoints > 0).map(row => `<span title="${safeHtml(row.type.name)} ${percentLabel(row.shareBasisPoints / 100)}" style="width:${row.shareBasisPoints / 100}%;background:${row.type.color}"></span>`).join('')}</div>` : '';
+  const sortedRows = result.rows.slice().sort((a, b) => b.shareBasisPoints - a.shareBasisPoints || b.amount - a.amount || a.sourceIndex - b.sourceIndex);
+  return `<div class="performance-share">
+    <div class="share-total-card"><div>${totalHeadline}</div><small>${result.calculable ? '各项占比经尾差校正，合计精确为 100%' : '占比以当月业绩价格为计算基础'}</small></div>
+    ${stacked}${notice}
+    <div class="share-list">${sortedRows.map(row => {
+      const percent = result.calculable ? percentLabel(row.shareBasisPoints / 100) : '—';
+      const amountText = !row.priced ? '待定价' : money(row.amount);
+      return `<div class="share-row ${row.priced ? '' : 'is-unpriced'}">
+        <div class="share-row-head"><div class="share-name"><span class="dot" style="background:${row.type.color}"></span><strong>${safeHtml(row.type.name)}</strong></div><div class="share-values"><b>${percent}</b>${showMoney ? `<span>${amountText}</span>` : ''}</div></div>
+        <div class="share-track"><span style="width:${row.shareBasisPoints / 100}%;background:${row.type.color}"></span></div>
+        ${showMoney ? `<div class="share-meta">${row.count} 笔 · ${formatValue(row.value, row.type.unit)}${row.priced ? ` · 单价 ${priceLabel(row.type)}` : ' · 未计入占比'}</div>` : ''}
+      </div>`;
+    }).join('')}</div>
+  </div>`;
 }
 function summaryList(items, withProgress = false) {
   if (!items.length) return `<div class="empty">暂无数据</div>`;
@@ -902,8 +1112,8 @@ function typeBarChart(items) {
     const priced = typePrice(x.type) !== null;
     const chartValue = showAmount && priced ? x.totalPrice : x.value;
     return `<div class="type-bar-row price-chart-row">
-      <div class="type-bar-label"><span class="dot" style="background:${x.type.color}"></span>${safeHtml(x.type.name)}</div>
-      <div class="type-bar-track"><span style="width:${Math.max(3, chartValue / max * 100)}%; background:${x.type.color}"></span></div>
+      <div class="type-bar-label" title="${safeHtml(x.type.name)}"><span class="dot" style="background:${x.type.color}"></span><span class="type-bar-name">${safeHtml(x.type.name)}</span></div>
+      <div class="type-bar-track" aria-label="${safeHtml(x.type.name)}占比"><span style="width:${Math.max(3, chartValue / max * 100)}%; background:${x.type.color}"></span></div>
       <div class="type-bar-value">${showAmount ? (priced ? money(x.totalPrice) : '待定价') : formatValue(x.value, x.type.unit)}<small>${showAmount ? formatValue(x.value, x.type.unit) : `${x.count} 笔`}</small></div>
     </div>`;
   }).join('')}</div>`;
@@ -1746,6 +1956,69 @@ function bindPage() {
     const ok = await pullRemoteForAuth();
     render();
     showToast(ok ? '全公司统一云端配置已保存' : '配置已保存，但连接测试失败');
+  };
+  const reminderForm = document.getElementById('reminderForm');
+  if (reminderForm) reminderForm.onsubmit = async e => {
+    e.preventDefault();
+    const fd = new FormData(reminderForm);
+    const enabled = fd.get('enabled') === 'on';
+    const time = String(fd.get('time') || '20:00');
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) { showToast('请选择有效的提醒时间'); return; }
+    saveReminderSettings({ enabled, time });
+    const applied = applyNativeReminder(reminderSettings);
+    if (enabled && hasNativeReminder()) {
+      try { nativeBridge()?.requestReminderPermissions?.(); } catch (err) { console.error(err); }
+      readNativeReminderStatus();
+    }
+    if (!hasNativeReminder()) {
+      if (enabled && 'Notification' in window && Notification.permission === 'default') await Notification.requestPermission();
+      scheduleBrowserReminderLoop();
+    }
+    render();
+    showToast(enabled ? (applied ? `已设置每天 ${time} 发送任务栏提醒` : `已保存每天 ${time} 的提醒设置`) : '每日提醒已关闭');
+  };
+  const testReminderBtn = document.getElementById('testReminderBtn');
+  if (testReminderBtn) testReminderBtn.onclick = async () => {
+    const bridge = nativeBridge();
+    if (bridge && typeof bridge.showTestReminder === 'function') {
+      try {
+        const result = String(bridge.showTestReminder() || '');
+        if (result === 'sent') showToast('测试通知已发送，请查看系统通知栏');
+        else if (result === 'permission_required') showToast('请先完成通知和精确定时权限设置');
+        else showToast('测试通知发送失败，请检查系统通知设置');
+        setTimeout(() => { readNativeReminderStatus(); if (page === 'settings') render(); }, 500);
+      } catch (err) { console.error(err); showToast('测试通知发送失败'); }
+      return;
+    }
+    const ok = await showBrowserReminder();
+    showToast(ok ? '测试通知已发送' : '通知权限未开启或当前浏览器不支持');
+  };
+  const backgroundTestReminderBtn = document.getElementById('backgroundTestReminderBtn');
+  if (backgroundTestReminderBtn) backgroundTestReminderBtn.onclick = () => {
+    const bridge = nativeBridge();
+    try {
+      const result = String(bridge?.scheduleBackgroundTest?.(60) || '');
+      if (result.startsWith('scheduled:')) {
+        const exact = result.endsWith(':exact');
+        showToast(exact ? '已安排 1 分钟后提醒，请立即退出软件进行测试' : '已安排后台测试，但未开精确定时权限，系统可能延迟');
+      } else if (result === 'permission_required') {
+        showToast('请先允许通知权限，再进行后台测试');
+      } else showToast('后台测试安排失败');
+      setTimeout(() => { readNativeReminderStatus(); if (page === 'settings') render(); }, 500);
+    } catch (err) { console.error(err); showToast('后台测试安排失败'); }
+  };
+  const notificationSettingsBtn = document.getElementById('notificationSettingsBtn');
+  if (notificationSettingsBtn) notificationSettingsBtn.onclick = () => {
+    const bridge = nativeBridge();
+    try { bridge?.openNotificationSettings?.(); } catch (err) { console.error(err); }
+  };
+  const alarmSettingsBtn = document.getElementById('alarmSettingsBtn');
+  if (alarmSettingsBtn) alarmSettingsBtn.onclick = () => {
+    try { nativeBridge()?.openAlarmSettings?.(); } catch (err) { console.error(err); }
+  };
+  const batterySettingsBtn = document.getElementById('batterySettingsBtn');
+  if (batterySettingsBtn) batterySettingsBtn.onclick = () => {
+    try { nativeBridge()?.openBatterySettings?.(); } catch (err) { console.error(err); }
   };
   const amountVisibilityForm = document.getElementById('amountVisibilityForm');
   if (amountVisibilityForm) amountVisibilityForm.onsubmit = async e => {
@@ -2991,6 +3264,13 @@ function exportCsv() {
   downloadFile(includeAmounts ? 'performance-records-with-price.csv' : 'performance-records.csv', '\ufeff' + csv, 'text/csv;charset=utf-8');
 }
 
+window.openPerformanceEntryFromNotification = () => {
+  if (!currentUser()) return;
+  page = 'add';
+  render();
+  setTimeout(() => document.querySelector('#recordForm input, #recordForm select')?.focus?.(), 120);
+};
+
 document.querySelectorAll('.tabbar button').forEach(b => b.onclick = () => {
   if (!requireAuth('请先登录后再使用')) return;
   page = b.dataset.page; render();
@@ -3012,6 +3292,7 @@ setInterval(() => {
   syncMeta.pending ? pushToYunduan(false) : pullFromYunduan(false);
 }, 90000);
 if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+if (hasNativeReminder()) { applyNativeReminder(reminderSettings); readNativeReminderStatus(); } else scheduleBrowserReminderLoop();
 render();
 setTimeout(async () => {
   await flushPendingSessionReleases();
