@@ -6,7 +6,7 @@ const DEVICE_KEY = 'bank-performance-yunduan-device-v1';
 const PENDING_SESSION_RELEASE_KEY = 'bank-performance-yunduan-pending-session-release-v1';
 const REMOTE_SESSION_TTL_MS = 30 * 60 * 1000;
 const REMOTE_SESSION_TOUCH_INTERVAL_MS = 8 * 60 * 1000;
-const APP_VERSION = '29.0';
+const APP_VERSION = '30.0';
 try {
   if (window.AndroidBridge || window.Android) document.documentElement.classList.add('native-android');
   if (new URLSearchParams(location.search).get('desktop') === 'windows') document.documentElement.classList.add('native-windows');
@@ -927,7 +927,7 @@ function settingsTpl() {
   const users = admin ? moduleCardTpl('settings', 'users', '用户账号管理', `<p class="muted">可停用账号、强制下线当前设备、仅永久删除登录账号，或连同成员资料和全部业绩数据一起永久删除。永久删除需要二次确认，并会立即同步到统一云端。</p><div class="list">${(state.users || []).map(userItem).join('')}</div>`) : '';
   const members = admin ? moduleCardTpl('settings', 'members', '成员管理', `<div class="row wrap module-toolbar"><span class="muted">维护成员姓名与岗位信息</span><button id="addMemberBtn" class="ghost small">新增成员</button></div><div class="list">${state.members.map(memberItem).join('')}</div>`) : '';
   const types = moduleCardTpl('settings', 'types', admin ? '业绩类型与定价管理' : '我的业绩类型', `
-    <div class="row wrap module-toolbar"><p class="muted">${admin ? '可为公共类型和个人类型定价；个人类型可直接转为所有成员可用的公共类型。转换后原有记录不会丢失。' : '新增名称时会先匹配公共类型；同名公共类型存在时直接使用。'}</p><button id="addTypeBtn" class="ghost small">${admin ? '新增公共类型' : '新增个人类型'}</button></div>
+    <div class="row wrap module-toolbar"><p class="muted">${admin ? '可为公共类型和个人类型定价；个人类型可转为公共类型。管理员删除类型时仅停止后续录入，历史记录、历史月份统计和原定价数据均保留。' : '新增名称时会先匹配公共类型；同名公共类型存在时直接使用。'}</p><button id="addTypeBtn" class="ghost small">${admin ? '新增公共类型' : '新增个人类型'}</button></div>
     <div class="list">${visibleTypes(user).map(typeItem).join('') || `<div class="empty">${admin ? '暂无业绩类型' : '暂无业绩类型，可点击新增类型'}</div>`}</div>`);
   const core = admin ? moduleCardTpl('settings', 'core', '业绩核心汇总管理', `<p class="muted">添加首页展示的大类并勾选包含的业绩类型。所有成员可按日期查看。</p>${coreSummaryManagementTpl()}`, '仅管理员维护') : '';
   const reminder = moduleCardTpl('settings', 'reminder', '每日业绩录入提醒', `
@@ -1764,14 +1764,20 @@ function bindPage() {
     if (!t) return;
     if (!isAdmin() && typeOwnerId(t) !== currentUser()?.memberId) { showToast('只能删除自己的业绩类型'); return; }
     if (!isAdmin() && (typePrice(t) !== null || (state.coreSummaries || []).some(g => (g.typeIds || []).includes(t.id)))) { showToast('该类型已由管理员定价或纳入核心汇总，不能由用户删除'); return; }
-    if (state.records.some(r => r.typeId === b.dataset.deleteType)) { showToast('该类型已有记录，不能直接删除'); return; }
-    if (!confirm('确定删除该业绩类型？')) return;
+    const existingRecordCount = (state.records || []).filter(r => r.typeId === b.dataset.deleteType).length;
+    if (!isAdmin() && existingRecordCount) { showToast('该类型已有记录，不能由普通用户删除'); return; }
+    const confirmText = isAdmin()
+      ? `确定删除业绩类型“${t.name}”吗？\n\n删除后该类型不再出现在后续录入选项中；已有 ${existingRecordCount} 笔历史记录、历史月报数据、单价及占比计算依据均不会删除。`
+      : '确定删除该业绩类型？';
+    if (!confirm(confirmText)) return;
     const deletedAt = new Date().toISOString();
     t.active = false;
     t.deletedAt = deletedAt;
+    t.deletedBy = currentUser()?.id || '';
     t.updatedAt = deletedAt;
     state.coreSummaries = (state.coreSummaries || []).map(g => ({ ...g, typeIds: (g.typeIds || []).filter(id => id !== b.dataset.deleteType), updatedAt: deletedAt, updatedBy: currentUser()?.id || '' }));
     saveLocal(); render();
+    showToast(existingRecordCount ? `类型已删除，${existingRecordCount} 笔历史业绩数据已保留` : '业绩类型已删除');
   });
   document.querySelectorAll('[data-price-type]').forEach(b => b.onclick = () => {
     if (!isAdmin()) { showToast('只有管理员可以设置业绩单价'); return; }
@@ -1811,7 +1817,7 @@ function bindPage() {
     }
     if (isAdmin(user) && globalMatch) { showToast('已存在同名公共业绩类型'); return; }
     const ownerMemberId = isAdmin(user) ? 'global' : user.memberId;
-    const ownMatch = (state.types || []).find(t => typeOwnerId(t) === ownerMemberId && canonicalTypeName(t.name) === canonicalTypeName(name));
+    const ownMatch = (state.types || []).find(t => t.active !== false && typeOwnerId(t) === ownerMemberId && canonicalTypeName(t.name) === canonicalTypeName(name));
     if (ownMatch) { showToast('已存在同名业绩类型'); return; }
     const unit = String(prompt('请输入单位：万元 / 元 / 笔 / 户 / 张 / 次 / 件 / 份', '笔') || '笔').trim() || '笔';
     let price = null;
@@ -2632,7 +2638,8 @@ async function fetchRemoteBundle(user = currentUser()) {
   if (!publicRemote) return null;
   const pub = publicRemote.data || {};
   const mode = ['all','own','hidden'].includes(pub.settings?.amountVisibility) ? pub.settings.amountVisibility : 'all';
-  const shouldLoadPricing = !!user && (isAdmin(user) || mode !== 'hidden');
+  // 即使金额权限为“全部隐藏”，仍在应用内部加载定价，仅用于计算个人业绩占比；界面继续隐藏所有金额。
+  const shouldLoadPricing = !!user;
   const pricingRemote = shouldLoadPricing ? await getRemoteJson(pricingFilePath()) : null;
   const users = dataOwnersFromPublic(pub);
   const userRemotes = await Promise.all(users.map(async u => {
