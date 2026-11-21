@@ -6,7 +6,7 @@ const DEVICE_KEY = 'bank-performance-yunduan-device-v1';
 const PENDING_SESSION_RELEASE_KEY = 'bank-performance-yunduan-pending-session-release-v1';
 const REMOTE_SESSION_TTL_MS = 30 * 60 * 1000;
 const REMOTE_SESSION_TOUCH_INTERVAL_MS = 8 * 60 * 1000;
-const APP_VERSION = '31.4';
+const APP_VERSION = '31.12';
 const RECORD_DRAFT_KEY = 'bank-performance-record-draft-v31';
 try {
   if (window.AndroidBridge || window.Android) document.documentElement.classList.add('native-android');
@@ -94,7 +94,7 @@ function restoreRecordDraft() {
 }
 function recordApproved(r) { return r.reviewStatus !== 'pending' && r.reviewStatus !== 'rejected'; }
 function validRecords(records) { return (records || []).filter(recordApproved); }
-function managerConfig() { return state.performanceManager || { staff: [], types: [], updatedAt: '' }; }
+function managerConfig() { return state.performanceManager || { staff: [], types: [], typeOrder: [], updatedAt: '' }; }
 function managerTypes() { return (managerConfig().types || []).filter(t => t.active !== false).slice().sort((a,b) => Number(a.sortOrder||0)-Number(b.sortOrder||0)); }
 function managerMatchType(text) {
   // Only the explicit keyword list is eligible. Never fuzzy/sub-string match,
@@ -107,26 +107,26 @@ function managerTypeForRecord(r, apply) {
   const original = typeById(r.typeId);
   return apply ? managerMatchType(original?.name || '') : null;
 }
-function managerMonthData(month, apply, external = null) {
+function managerMonthData(month, apply, external = null, source = state) {
   // All remote owners are loaded before this routine; never scope to the logged-in user.
-  const records = validRecords(external === null ? state.records : external).filter(r =>
-    external !== null || !month || !r.date || String(r.date).startsWith(month));
-  const byName = new Map((state.members || []).map(m => [m.id, String(m.name || '').trim()]));
-  const byType = new Map((state.types || []).map(t => [t.id, t]));
-  const preferred = apply ? (managerConfig().staff || []).map(s => String(s).trim()).filter(Boolean) : [];
+  const records = validRecords(external === null ? source.records : external).filter(r =>
+    !month || String(r.date || '').startsWith(month));
+  const byName = new Map((source.members || []).map(m => [m.id, String(m.name || '').trim()]));
+  const byType = new Map((source.types || []).map(t => [t.id, t]));
+  const preferred = apply ? ((source.performanceManager || managerConfig()).staff || []).map(s => String(s).trim()).filter(Boolean) : [];
   const getName = r => String(r.importName || byName.get(r.memberId) || r.memberName || '').trim();
-  const getType = r => String(r.originalTypeName || byType.get(r.typeId)?.name || r.typeName || '').trim();
+  const getType = r => String(byType.get(r.typeId)?.name || r.originalTypeName || r.typeName || '').trim();
   const unique = items => [...new Set(items.filter(Boolean))];
   // Configured staff are always first, even when they have zero records.
   const names = unique([...preferred, ...records.map(getName)]);
   const members = names.map((name, i) => ({ id: 'manager_staff_' + i, name }));
   const nameIds = new Map(members.map(m => [m.name, m.id]));
-  const configuredTypes = apply ? managerTypes() : [];
+  const configuredTypes = apply ? ((source.performanceManager?.types || managerTypes()).filter(t => t.active !== false).slice().sort((a,b)=>Number(a.sortOrder||0)-Number(b.sortOrder||0))) : [];
   const matched = new Map();
   const unmatched = [];
   const originalNames = unique(records.map(getType));
   originalNames.forEach(name => {
-    const hit = configuredTypes.length ? managerMatchType(name) : null;
+    const hit = configuredTypes.find(t => (t.keywords || []).some(k => String(k || '').trim() === name)) || null;
     if (hit) matched.set(name, hit);
     else unmatched.push(name);
   });
@@ -138,7 +138,13 @@ function managerMonthData(month, apply, external = null) {
     const sourceRecord = records.find(r => getType(r) === name);
     return { id: 'manager_raw_type_' + i, name, price: found?.price ?? null, unit: sourceRecord?.unit || found?.unit || '项', sortOrder: configuredTypes.length + i + 1 };
   });
-  const types = [...configuredTypes.map(t => ({ ...t, price: t.price ?? 0 })), ...fallbackTypes];
+  // Explicit column order is independent of keyword grouping and staff order.
+  // Unlisted categories follow their previous order (manager types, then raw types).
+  const defaultTypes = [...configuredTypes.map(t => ({ ...t, price: t.price ?? 0 })), ...fallbackTypes];
+  const desired = apply ? (source.performanceManager?.typeOrder || []).map(x => String(x).trim()) : [];
+  const rank = new Map(desired.map((name, i) => [name, i]));
+  const types = defaultTypes.map((t, i) => ({t, i})).sort((a,b) =>
+    (rank.has(a.t.name) ? rank.get(a.t.name) : Infinity) - (rank.has(b.t.name) ? rank.get(b.t.name) : Infinity) || a.i - b.i).map(x => x.t);
   const fallbackByName = new Map(fallbackTypes.map(t => [t.name, t]));
   const totals = new Map(), ignored = [];
   records.forEach(r => {
@@ -180,6 +186,7 @@ function normalizeManager(raw) {
   const d = raw && typeof raw === 'object' ? raw : {};
   return {
     staff: Array.isArray(d.staff) ? [...new Set(d.staff.map(x=>String(x).trim()).filter(Boolean))].slice(0,2000) : [],
+    typeOrder: Array.isArray(d.typeOrder) ? [...new Set(d.typeOrder.map(x=>String(x).trim()).filter(Boolean))].slice(0,2000) : [],
     types: Array.isArray(d.types) ? d.types.map((x,i)=>({ id:String(x.id||'manager_'+i),name:String(x.name||'').trim(),price:Math.max(0,Number(x.price)||0),unit:String(x.unit||'项').trim()||'项',keywords:Array.isArray(x.keywords)?x.keywords.map(k=>String(k).trim()).filter(Boolean):[],sortOrder:Number(x.sortOrder)||i+1,active:x.active!==false })).filter(t=>t.name).slice(0,1000) : [],
     accessCodeHash: String(d.accessCodeHash || ''),
     updatedAt: String(d.updatedAt || '')
@@ -209,6 +216,7 @@ function managerTpl() {
  <p class="muted">管理员直接进入，其他账号验证管家口令后进入。点击保存后共享到云端所有客户端。包含列表仅按完整业绩类型名称精确匹配（不模糊、不按子串匹配）；未在包含列表中的类型保持原名。重复配置时按类型排序优先。</p>
  ${isAdmin() ? `<form id="managerCodeForm" class="field"><label>管理员设置管家口令（至少4位，保存后立即生效）</label><div class="row wrap"><input id="managerNewCode" type="password" minlength="4" autocomplete="new-password" placeholder="填写新口令"><button class="soft small" type="submit">更新口令</button></div><small class="muted">普通用户进入时必须验证；请通过安全渠道通知相关人员。</small></form>` : ''}
  <form id="managerForm"><div class="field"><label>业绩人员名单（每行一个姓名）</label><textarea id="managerStaff" rows="5" placeholder="张三&#10;李四">${safeHtml((d.staff||[]).join('\n'))}</textarea></div>
+ <div class="field"><label>汇总表业绩类型列顺序（每行一个完整类型名称，从左到右）</label><textarea id="managerTypeOrder" rows="5" placeholder="信用卡&#10;储蓄卡">${safeHtml((d.typeOrder||[]).join('\n'))}</textarea><small class="muted">仅影响启用管家设置后的 Excel 列顺序；未列出的业绩类型保持原有顺序追加在右侧。</small></div>
  <div class="section-title"><h3>业绩类型、单价及包含关键词</h3><button id="managerAddType" type="button" class="ghost small">新增类型</button></div>
  <div id="managerTypeRows">${list.map((t,i)=>managerTypeRow(t,i)).join('')}</div>
  <button class="primary full" type="submit">保存并共享所有用户</button></form></section>
@@ -228,7 +236,7 @@ function collectManagerForm() {
  const types=rows.map((el,i)=>({id:el.dataset.mid||uid(),name:el.querySelector('[data-field="name"]').value.trim(),price:Number(el.querySelector('[data-field="price"]').value||0),unit:el.querySelector('[data-field="unit"]').value.trim()||'项',keywords:el.querySelector('[data-field="keywords"]').value.split(/[,，#\n;；]+/).map(x=>x.trim()).filter(Boolean),sortOrder:i+1,active:true}));
  if(types.some(t=>!t.name||!Number.isFinite(t.price)||t.price<0)) throw new Error('类型名称不能为空，单价必须为非负数字');
  if(new Set(types.map(t=>t.name)).size!==types.length) throw new Error('业绩类型名称不能重复');
- return normalizeManager({staff:document.getElementById('managerStaff').value.split(/\r?\n/),types,accessCodeHash:managerConfig().accessCodeHash,updatedAt:new Date().toISOString()});
+ return normalizeManager({staff:document.getElementById('managerStaff').value.split(/\r?\n/),typeOrder:document.getElementById('managerTypeOrder').value.split(/\r?\n/),types,accessCodeHash:managerConfig().accessCodeHash,updatedAt:new Date().toISOString()});
 }
 async function shareManager() {
  // Separate public manager update prevents a regular member from rewriting accounts/pricing.
@@ -263,22 +271,105 @@ function parsePerformanceTxt(content, filename='') {
   });
   return {name,results,errors};
 }
-function exportManagerData(month, apply, raw, filename) {
- const {members,types,totals,ignored}=managerMonthData(month,apply,raw);
+function exportManagerData(month, apply, raw, filename, source = state) {
+ const {members,types,totals,ignored}=managerMonthData(month,apply,raw,source);
  if(!members.length||!types.length) {showToast('需要先设置人员和业绩类型，或取消管家设置使用原始人员类型');return;}
- downloadBlob(filename,buildMonthlySummaryXlsx(month,members,types,totals));
+ downloadBlob(filename,buildMonthlySummaryXlsx(month,members,types,totals,false,!isAdmin()));
  showToast(`已生成 Excel：${members.length} 人，${types.length} 类；${ignored.length} 笔未匹配项目未入表`);
 }
-async function exportManagerCloud(scope = 'all') {
- if(!requireAuth())return;
- if(scope==='all' && !isAdmin() && (page!=='manager' || managerUnlockedFor!==currentUser()?.id || managerUnlockedHash!==managerConfig().accessCodeHash)){showToast('请先验证管家口令进入业绩管家');return;}
- const apply=!!document.getElementById('useManagerOneTime')?.checked || !!document.getElementById('managerApply')?.checked;
- const month=document.getElementById('managerMonth')?.value || window.__selectedMonth || monthStr();
- if(!(await syncLatestBeforeExport()))return;
- // A user only obtains the all-user export in the manager's isolated workflow.
- const raw=validRecords(state.records).filter(r=>r.date?.startsWith(month) && (scope==='all' || r.memberId===currentUser()?.memberId));
- exportManagerData(month,apply,raw,`${month}_业绩管家全员汇总.xlsx`);
+// Manager reporting deliberately uses the original split documents.  The normal
+// application state normalizer is for editing and may discard historical types.
+function managerSnapshotFromDocuments(bundle) {
+ const pub = bundle.publicRemote.data || {};
+ const docs = bundle.userDocs || [];
+ const members = (pub.members || []).filter(m => m && m.id);
+ const prices = pricingMapFromDocument(bundle.pricingRemote?.data || null);
+ const types = [ ...(pub.globalTypes || pub.types || []),
+   ...docs.flatMap(d => Array.isArray(d.personalTypes) ? d.personalTypes : []) ].map(t => {
+     const entry = prices[t.id];
+     const price = entry ? entry.price : t.price;
+     return {...t, price: price === null || price === '' || price === undefined || !Number.isFinite(Number(price)) ? null : Number(price)};
+   });
+ const typeById = new Map(types.map(t => [String(t.id), t]));
+ const deleted = new Map(docs.flatMap(d => Array.isArray(d.deletedRecords) ? d.deletedRecords : [])
+   .filter(x => x && x.id).map(x => [String(x.id), itemStamp(x)]));
+ const records = [];
+ const unresolved = new Set();
+ for (const doc of docs) {
+   if (!Array.isArray(doc.records)) throw new Error(`文件 ${doc.userId || doc.memberId || '未知'} 的 records 不是数组`);
+   for (const r of doc.records) {
+     if (!r || typeof r !== 'object') continue;
+     if (deleted.has(String(r.id)) && deleted.get(String(r.id)) >= itemStamp(r)) continue;
+     const rawType = typeById.get(String(r.typeId || ''));
+     const name = String(rawType?.name || r.originalTypeName || r.typeName || '').trim();
+     if (!name) { unresolved.add(String(r.typeId || '(空)')); continue; }
+     records.push({ ...r, memberId: r.memberId || doc.memberId,
+       originalTypeName: name, unit: rawType?.unit || r.unit || '项' });
+   }
+ }
+ if (unresolved.size) throw new Error('存在无法识别名称的业绩类型 ID：' + [...unresolved].slice(0,8).join('、'));
+ return { records, members, types, performanceManager: normalizeManager(pub.performanceManager),
+   fileCount: docs.length, originalCount: docs.reduce((n,d)=>n+d.records.length,0) };
 }
+function managerRecordMonth(value) {
+ const s = String(value ?? '').trim();
+ const m = /^(\d{4})[-/.年](\d{1,2})(?:[-/.月]|$)/.exec(s);
+ if (m) return `${m[1]}-${String(Number(m[2])).padStart(2,'0')}`;
+ if (/^\d{13}$/.test(s) || /^\d{10}$/.test(s)) {
+   const d = new Date(Number(s) * (s.length === 10 ? 1000 : 1));
+   if (!Number.isNaN(d.getTime())) return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}`;
+ }
+ return '';
+}
+function managerCloudAudit(records, month) {
+ const months = new Map(), statuses = new Map();
+ let undated = 0, inMonth = 0, approved = 0;
+ for (const r of records) {
+   const m = managerRecordMonth(r.date);
+   if (!m) undated++; else months.set(m, (months.get(m) || 0) + 1);
+   if (m !== month) continue;
+   inMonth++;
+   const status = String(r.reviewStatus ?? '(未设置)').trim() || '(未设置)';
+   statuses.set(status, (statuses.get(status) || 0) + 1);
+   if (recordApproved(r)) approved++;
+ }
+ return {inMonth,approved,undated,months:[...months].sort((a,b)=>b[0].localeCompare(a[0])),statuses:[...statuses]};
+}
+async function exportManagerCloud(scope = 'all') {
+ // Click handlers may supply a MouseEvent; only explicit 'self' may restrict results.
+ scope = scope === 'self' ? 'self' : 'all';
+ if (!requireAuth()) return;
+ if (scope === 'all' && !isAdmin() && (page !== 'manager' || managerUnlockedFor !== currentUser()?.id || managerUnlockedHash !== managerConfig().accessCodeHash)) {
+   showToast('请先验证管家口令进入业绩管家'); return;
+ }
+ if (!cloudReady() || navigator.onLine === false) { showToast('全员汇总需要联网读取云端所有员工数据'); return; }
+ const apply = !!document.getElementById('useManagerOneTime')?.checked || !!document.getElementById('managerApply')?.checked;
+ const month = document.getElementById('managerMonth')?.value || window.__selectedMonth || monthStr();
+ const btn = document.getElementById('managerCloudExport');
+ if (btn) { btn.disabled = true; btn.textContent = '正在核对云端员工记录…'; }
+ try {
+   if (!(await ensureCurrentAccountSession({ touch: true, showMessage: true }))) return;
+   const bundle = await fetchRemoteBundle(currentUser(), true);
+   if (!bundle) throw new Error('云端分文件目录不存在');
+   const snapshot = managerSnapshotFromDocuments(bundle);
+   const audit = managerCloudAudit(snapshot.records, month);
+   const raw = validRecords(snapshot.records).filter(r => managerRecordMonth(r.date) === month &&
+     (scope === 'all' || r.memberId === currentUser()?.memberId));
+   const months = audit.months.map(([m,n])=>`${m}：${n}笔`).join('，') || '无有效日期';
+   const statuses = audit.statuses.map(([k,n])=>`${k}：${n}笔`).join('，') || '无';
+   const summary = `读取 ${snapshot.fileCount} 个文件，原始 ${snapshot.originalCount} 笔，保留 ${snapshot.records.length} 笔；${month} 共 ${audit.inMonth} 笔，审核有效 ${raw.length} 笔。云端月份分布：${months}。本月审核状态：${statuses}。无法识别日期 ${audit.undated} 笔。`;
+   const status = document.getElementById('managerImportStatus');
+   if (status) status.textContent = summary;
+   if (!raw.length) {
+     showToast(`本月有效记录为 0，已停止导出。请查看页面下方的月份与审核状态诊断。`);
+     return;
+   }
+   exportManagerData(month, apply, raw, `${month}_业绩管家全员汇总.xlsx`, snapshot);
+   showToast(`已核对：${month} 共 ${audit.inMonth} 笔，审核有效 ${raw.length} 笔`);
+ } catch (err) { console.error(err); showToast('全员数据读取失败：' + String(err?.message || err).slice(0,160)); }
+ finally { if (btn) { btn.disabled = false; btn.textContent = '读取云端全员数据并生成 Excel'; } }
+}
+
 function bindManagerPage() {
  const back=document.getElementById('backManagerBtn'); if(back)back.onclick=()=>{page='settings';render();};
  const codeForm=document.getElementById('managerCodeForm');
@@ -303,7 +394,7 @@ function bindManagerPage() {
   };
   form.onsubmit=async e=>{e.preventDefault();try {state.performanceManager=collectManagerForm();saveLocal(false);await shareManager();}catch(err){showToast(String(err.message||err));}};
  }
- const cloud=document.getElementById('managerCloudExport');if(cloud)cloud.onclick=exportManagerCloud;
+ const cloud=document.getElementById('managerCloudExport');if(cloud)cloud.onclick=()=>exportManagerCloud('all');
  const txt=document.getElementById('managerTxtExport');if(txt)txt.onclick=async()=>{
   const files=[...(document.getElementById('managerTxtFiles')?.files||[])];
   if(!files.length){showToast('请选择一个或多个 TXT 文件');return;}
@@ -315,16 +406,10 @@ function bindManagerPage() {
   if(!all.length){showToast('未识别到有效业绩记录');return;}
   const month=document.getElementById('managerMonth').value||monthStr();
   const apply=!!document.getElementById('managerApply').checked;
-  // Imported TXT has its own member/type name; no database write.
-  const oldMembers=state.members,oldTypes=state.types;
-  if(!apply) {
-    const names=[...new Set(all.map(r=>r.importName))];
-    const namesTypes=[...new Set(all.map(r=>r.originalTypeName))];
-    state.members=names.map((name,i)=>({id:'import_member_'+i,name,active:true}));
-    state.types=namesTypes.map((name,i)=>({id:'import_type_'+i,name,unit:all.find(r=>r.originalTypeName===name)?.unit||'项',sortOrder:i+1,price:0,active:true,scope:'global'}));
-    all.forEach(r=>{r.memberId=state.members.find(m=>m.name===r.importName).id;r.typeId=state.types.find(t=>t.name===r.originalTypeName).id;});
-  }
-  try {exportManagerData(month,apply,all,`${month}_TXT业绩汇总.xlsx`);}finally{state.members=oldMembers;state.types=oldTypes;}
+  all.forEach(r=>{r.date=month+'-01';});
+  // TXT names and categories are self-contained. Never mutate shared application state.
+  // The same one-time manager switch applies to both cloud and TXT exports.
+  exportManagerData(month,apply,all,`${month}_TXT业绩汇总.xlsx`);
  };
 }
 
@@ -332,6 +417,7 @@ function bindManagerPage() {
 // v31.4: client-only quick tools. These never change state.records or cloud data.
 let quickToolsReturnPage = 'home';
 let quickToolDraft = { text: '', month: monthStr(), rules: [], preview: null };
+let quickToolPanelOpen = false;
 function openQuickTools() {
   if (!requireAuth()) return;
   if (page !== 'quicktools') quickToolsReturnPage = page === 'manager' ? 'settings' : page;
@@ -403,7 +489,7 @@ function quickToolTpl() {
   return `<section class="card"><div class="section-title"><h2>便捷工具</h2><button id="quickBackBtn" class="ghost small" type="button">返回原页面</button></div>
     <p class="muted">无需管家口令，所有已登录用户均可使用。只处理本次粘贴的文本，不修改原有记录或云端设置。</p>
     <div class="quick-tool-list"><button id="quickTextOpen" class="primary quick-tool-big" type="button">📋 文本业绩汇总统计 <span>粘贴多人业绩 · 精确包含 · 月汇总 Excel</span></button></div></section>
-    <section class="card" id="quickTextPanel" style="display:none"><div class="section-title"><h2>文本业绩汇总统计</h2><span class="pill">仅本次有效</span></div>
+    <section class="card" id="quickTextPanel" style="display:${quickToolPanelOpen ? 'block' : 'none'}"><div class="section-title"><h2>文本业绩汇总统计</h2><span class="pill">仅本次有效</span></div>
     <div class="field"><label for="quickMonth">汇总月份</label><input id="quickMonth" type="month" value="${safeHtml(d.month||monthStr())}"></div>
     <div class="field"><label for="quickInput">粘贴业绩文本（可连续填写多个人）</label><textarea id="quickInput" rows="12" spellcheck="false" placeholder="姓名：张三&#10;业绩：&#10;吸金，10，万&#10;姓名：李四&#10;业绩：&#10;吸金，15，万">${safeHtml(d.text)}</textarea></div>
     <div class="section-title"><h3>自定义包含关系</h3><button id="quickAddRule" type="button" class="soft small">+ 新增规则</button></div>
@@ -430,15 +516,21 @@ function bindQuickToolPage() {
   const btn=document.getElementById('quickTextOpen');
   const panel=document.getElementById('quickTextPanel');
   if (!btn||!panel) return;
-  btn.onclick=()=>{panel.style.display=panel.style.display==='none'?'':'none';};
+  btn.onclick=()=>{quickToolPanelOpen=!quickToolPanelOpen;panel.style.display=quickToolPanelOpen?'block':'none';};
   const rules=document.getElementById('quickRuleRows');
   document.getElementById('quickAddRule').onclick=()=>rules.insertAdjacentHTML('beforeend',quickRuleRow());
   rules.onclick=e=>{const target=e.target.closest('[data-quick-remove]');if(target)target.closest('.quick-rule-row')?.remove();};
-  document.getElementById('quickGenerate').onclick=()=>{
+  document.getElementById('quickGenerate').onclick=async()=>{
+    // Yield to the mobile WebView before expensive workbook creation.
     captureQuickDraft();
+    const generateButton=document.getElementById('quickGenerate');
+    if(generateButton.disabled)return;
+    generateButton.disabled=true;
     const status=document.getElementById('quickStatus');
     const preview=document.getElementById('quickPreview');
     try {
+      status.textContent='正在生成 Excel，请稍候…';
+      await new Promise(resolve=>setTimeout(resolve,0));
       if(!quickToolDraft.month)throw new Error('请先选择汇总月份');
       const parsed=parseQuickPerformanceText(quickToolDraft.text);
       if(parsed.errors.length){status.textContent='文本格式有误：'+parsed.errors.slice(0,15).join('；');return;}
@@ -448,8 +540,11 @@ function bindQuickToolPage() {
       const file=buildMonthlySummaryXlsx(quickToolDraft.month,result.members,result.types,result.totals,true);
       downloadBlob(`${quickToolDraft.month}_文本业绩月汇总.xlsx`,file);
       status.textContent=`成功汇总 ${result.members.length} 人、${parsed.records.length} 笔业绩、${result.types.length} 类；Excel 已生成。`;
-      preview.innerHTML=`<div class="quick-preview-scroll"><table class="quick-preview-table"><thead><tr><th>人员</th>${result.types.map(t=>`<th>${safeHtml(t.name)}（${safeHtml(t.unit)}）</th>`).join('')}</tr></thead><tbody>${result.members.map(m=>`<tr><th>${safeHtml(m.name)}</th>${result.types.map(t=>`<td>${Number(result.totals.get(m.id+'@@'+t.id)||0)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+      // Limit the preview DOM, not the exported data, to avoid mobile WebView OOM.
+      const previewMembers=result.members.slice(0,30), previewTypes=result.types.slice(0,15);
+      preview.innerHTML=`<p class="muted">预览前 ${previewMembers.length} 人、前 ${previewTypes.length} 类；完整数据均已写入 Excel。</p><div class="quick-preview-scroll"><table class="quick-preview-table"><thead><tr><th>人员</th>${previewTypes.map(t=>`<th>${safeHtml(t.name)}（${safeHtml(t.unit)}）</th>`).join('')}</tr></thead><tbody>${previewMembers.map(m=>`<tr><th>${safeHtml(m.name)}</th>${previewTypes.map(t=>`<td>${Number(result.totals.get(m.id+'@@'+t.id)||0)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
     }catch(err){status.textContent=String(err.message||err);preview.innerHTML='';}
+    finally{generateButton.disabled=false;}
   };
 }
 
@@ -3086,7 +3181,7 @@ function composeStateFromDocuments(publicDoc, pricingDoc, userDocs = []) {
     updatedAt: pub.updatedAt || new Date().toISOString()
   });
 }
-async function fetchRemoteBundle(user = currentUser()) {
+async function fetchRemoteBundle(user = currentUser(), requireAllFiles = false) {
   const publicRemote = await getRemoteJson(publicFilePath());
   if (!publicRemote) return null;
   const pub = publicRemote.data || {};
@@ -3097,9 +3192,25 @@ async function fetchRemoteBundle(user = currentUser()) {
   const users = dataOwnersFromPublic(pub);
   const userRemotes = await Promise.all(users.map(async u => {
     const remote = await getRemoteJson(userFilePath(u));
-    return remote?.data || emptyUserDocument(u);
+    if(requireAllFiles && !remote)throw new Error(`员工 ${u.displayName || u.name || u.id} 的云端数据文件不存在`);
+    const doc = remote?.data || emptyUserDocument(u);
+    if (!Array.isArray(doc.records)) throw new Error(`员工 ${u.displayName || u.name || u.id} 的文件缺少 records 数组`);
+    return doc;
   }));
-  return { publicRemote, pricingRemote, userDocs: userRemotes, state: composeStateFromDocuments(pub, pricingRemote?.data || null, userRemotes) };
+  // Audit raw documents before normalization. The ordinary normalizer deliberately
+  // drops records whose typeId is absent from its type catalog; reports must not
+  // silently lose these records.
+  const rawRecords = userRemotes.flatMap(d => d.records);
+  const typeIds = new Set([...(pub.globalTypes || pub.types || []), ...userRemotes.flatMap(d => d.personalTypes || [])].map(t => t.id));
+  const unresolvedTypes = [...new Set(rawRecords.filter(r => !typeIds.has(r.typeId) && !r.originalTypeName && !r.typeName).map(r => String(r.typeId || '(空类型ID)')))];
+  const snapshot = composeStateFromDocuments(pub, pricingRemote?.data || null, userRemotes);
+  // For reports, preserve raw records carrying a historical type ID if their
+  // original category name is available, without modifying stored documents.
+  if(requireAllFiles) {
+    const deleted = new Map(userRemotes.flatMap(d => d.deletedRecords || []).map(x => [x.id, itemStamp(x)]));
+    snapshot.records = rawRecords.filter(r => !deleted.has(r.id) || deleted.get(r.id) < itemStamp(r));
+  }
+  return { publicRemote, pricingRemote, userDocs: userRemotes, state: snapshot, audit: {totalRecords: rawRecords.length, unresolvedTypes} };
 }
 async function initializeSplitCloud() {
   const user = currentUser();
@@ -3563,25 +3674,29 @@ function xlsxFormulaCell(ref, formula, cachedValue, style = 0) {
   const n = Number(cachedValue || 0);
   return `<c r="${ref}" s="${style}"><f>${xlsxXmlEscape(formula)}</f><v>${Number.isFinite(n) ? n : 0}</v></c>`;
 }
-function buildMonthlySummaryXlsx(month, members, types, totals, quickMode = false) {
-  const lastColumnIndex = types.length + 2;
+function buildMonthlySummaryXlsx(month, members, types, totals, quickMode = false, hideManagerAmounts = false) {
+  const lastColumnIndex = types.length + (hideManagerAmounts ? 1 : 2);
+  const firstDataRow = hideManagerAmounts ? 3 : 4;
   const lastTypeColumnIndex = types.length + 1;
   const lastColumn = xlsxColumnName(lastColumnIndex);
-  const lastRow = Math.max(2, members.length + 2);
+  const lastRow = Math.max(hideManagerAmounts ? 2 : 3, members.length + firstDataRow - 1);
   const now = new Date().toISOString();
   const titleRowCells = [xlsxInlineCell('A1', '人员姓名/业绩类型', 1)];
   types.forEach((t, index) => titleRowCells.push(xlsxInlineCell(`${xlsxColumnName(index + 2)}1`, t.name || '', 1)));
-  titleRowCells.push(xlsxInlineCell(`${lastColumn}1`, quickMode ? '有业绩类型数' : '总业绩金额（元）', 5));
+  if (!hideManagerAmounts) titleRowCells.push(xlsxInlineCell(`${lastColumn}1`, quickMode ? '有业绩类型数' : '总业绩金额（元）', 5));
 
-  const priceRowCells = [xlsxInlineCell('A2', quickMode ? '业绩单位' : '业绩定价（元）', 2)];
+  const unitRowCells = [xlsxInlineCell('A2', '业绩单位', 2)];
+  types.forEach((t, index) => unitRowCells.push(xlsxInlineCell(`${xlsxColumnName(index + 2)}2`, t.unit || '项', 2)));
+  if (!hideManagerAmounts) unitRowCells.push(xlsxInlineCell(`${lastColumn}2`, '不同单位不相加', 2));
+  const priceRowCells = [xlsxInlineCell('A3', quickMode ? '统计说明' : '业绩定价（元）', 2)];
   types.forEach((t, index) => {
     const price = typePrice(t);
-    priceRowCells.push(quickMode ? xlsxInlineCell(`${xlsxColumnName(index + 2)}2`, t.unit || '项', 2) : xlsxNumberCell(`${xlsxColumnName(index + 2)}2`, price === null ? 0 : price, price === null ? 7 : 8));
+    priceRowCells.push(quickMode ? xlsxInlineCell(`${xlsxColumnName(index + 2)}3`, t.unit || '项', 2) : xlsxNumberCell(`${xlsxColumnName(index + 2)}3`, price === null ? 0 : price, price === null ? 7 : 8));
   });
-  priceRowCells.push(xlsxInlineCell(`${lastColumn}2`, quickMode ? '不同单位不相加' : '未定价按0元', 2));
+  priceRowCells.push(xlsxInlineCell(`${lastColumn}3`, quickMode ? '不同单位不相加' : '未定价按0元', 2));
 
   const dataRows = members.map((m, memberIndex) => {
-    const rowNumber = memberIndex + 3;
+    const rowNumber = memberIndex + firstDataRow;
     const cells = [xlsxInlineCell(`A${rowNumber}`, m.name || '', 3)];
     let cachedTotal = 0;
     types.forEach((t, typeIndex) => {
@@ -3591,9 +3706,9 @@ function buildMonthlySummaryXlsx(month, members, types, totals, quickMode = fals
       cells.push(xlsxNumberCell(`${xlsxColumnName(typeIndex + 2)}${rowNumber}`, value, 4));
     });
     const formula = types.length
-      ? (quickMode ? `COUNTIF(B${rowNumber}:${xlsxColumnName(lastTypeColumnIndex)}${rowNumber},">0")` : `SUMPRODUCT(B${rowNumber}:${xlsxColumnName(lastTypeColumnIndex)}${rowNumber},$B$2:$${xlsxColumnName(lastTypeColumnIndex)}$2)`)
+      ? (quickMode ? `COUNTIF(B${rowNumber}:${xlsxColumnName(lastTypeColumnIndex)}${rowNumber},">0")` : `SUMPRODUCT(B${rowNumber}:${xlsxColumnName(lastTypeColumnIndex)}${rowNumber},$B$3:$${xlsxColumnName(lastTypeColumnIndex)}$3)`)
       : '0';
-    cells.push(xlsxFormulaCell(`${lastColumn}${rowNumber}`, formula, cachedTotal, quickMode ? 4 : 6));
+    if (!hideManagerAmounts) cells.push(xlsxFormulaCell(`${lastColumn}${rowNumber}`, formula, cachedTotal, quickMode ? 4 : 6));
     return `<row r="${rowNumber}" ht="26" customHeight="1">${cells.join('')}</row>`;
   }).join('');
 
@@ -3605,12 +3720,13 @@ function buildMonthlySummaryXlsx(month, members, types, totals, quickMode = fals
   const sheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <dimension ref="A1:${lastColumn}${lastRow}"/>
-  <sheetViews><sheetView workbookViewId="0" showGridLines="0"><pane xSplit="1" ySplit="2" topLeftCell="B3" activePane="bottomRight" state="frozen"/><selection pane="topRight" activeCell="B1" sqref="B1"/><selection pane="bottomLeft" activeCell="A3" sqref="A3"/><selection pane="bottomRight" activeCell="B3" sqref="B3"/></sheetView></sheetViews>
+  <sheetViews><sheetView workbookViewId="0" showGridLines="0"><pane xSplit="1" ySplit="${hideManagerAmounts ? 2 : 3}" topLeftCell="${hideManagerAmounts ? 'B3' : 'B4'}" activePane="bottomRight" state="frozen"/><selection pane="topRight" activeCell="B1" sqref="B1"/><selection pane="bottomLeft" activeCell="A${firstDataRow}" sqref="A${firstDataRow}"/><selection pane="bottomRight" activeCell="B${firstDataRow}" sqref="B${firstDataRow}"/></sheetView></sheetViews>
   <sheetFormatPr defaultRowHeight="20"/>
-  <cols><col min="1" max="1" width="18" customWidth="1"/>${typeColumns}<col min="${lastColumnIndex}" max="${lastColumnIndex}" width="20" customWidth="1"/></cols>
+  <cols><col min="1" max="1" width="18" customWidth="1"/>${typeColumns}${hideManagerAmounts ? '' : `<col min="${lastColumnIndex}" max="${lastColumnIndex}" width="20" customWidth="1"/>`}</cols>
   <sheetData>
     <row r="1" ht="32" customHeight="1">${titleRowCells.join('')}</row>
-    <row r="2" ht="28" customHeight="1">${priceRowCells.join('')}</row>
+    <row r="2" ht="28" customHeight="1">${unitRowCells.join('')}</row>
+    ${hideManagerAmounts ? '' : `<row r="3" ht="28" customHeight="1">${priceRowCells.join('')}</row>`}
     ${dataRows}
   </sheetData>
   <sheetProtection sheet="0" objects="0" scenarios="0"/>
