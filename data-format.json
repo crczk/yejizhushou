@@ -5,14 +5,22 @@
   "files": {
     "public.json": {
       "registrationCode": "123456",
-      "settings": { "amountVisibility": "all" },
+      "settings": {
+        "amountVisibility": "all"
+      },
       "users": [],
       "members": [],
       "deletedUsers": [],
       "deletedMembers": [],
       "globalTypes": [],
       "coreSummaries": [],
-      "updatedAt": "2026-07-23T00:00:00.000Z"
+      "updatedAt": "2026-07-23T00:00:00.000Z",
+      "performanceManager": {
+        "staff": [],
+        "types": [],
+        "updatedAt": "",
+        "accessCodeHash": ""
+      }
     },
     "pricing.json": {
       "prices": {
@@ -29,7 +37,13 @@
       "userId": "user_id",
       "memberId": "member_id",
       "personalTypes": [],
-      "records": [],
+      "records": [
+        {
+          "reviewStatus": "approved|pending|rejected",
+          "reviewedAt": "",
+          "reviewedBy": ""
+        }
+      ],
       "deletedRecords": [],
       "updatedAt": "2026-07-23T00:00:00.000Z"
     }
@@ -42,5 +56,7 @@
     "all": "普通用户可查看全部公开金额",
     "own": "普通用户只查看本人金额",
     "hidden": "普通用户不显示金额且不拉取 pricing.json"
-  }
+  },
+  "compatibility": "数据 version 10、旧存储键及原分文件路径不变；v31.1 在 performanceManager 中增加可选的 accessCodeHash；旧记录默认批准；全部客户端升级后启用二次审核",
+  "release": "31.2"
 }

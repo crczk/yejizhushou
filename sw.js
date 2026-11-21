@@ -1,5 +1,5 @@
-const CACHE_NAME = 'performance-yunduan-webapp-v30-hidden-share-soft-delete';
-const ASSETS = ['./', './index.html', './styles.css', './cloud-config.js', './app.js', './manifest.webmanifest', './icon.svg', './version-v30.txt'];
+const CACHE_NAME = 'performance-yunduan-webapp-v31-4-quicktools';
+const ASSETS = ['./', './index.html', './styles.css', './cloud-config.js', './app.js', './manifest.webmanifest', './icon.svg', './version-v31.4.txt'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)));
   self.skipWaiting();

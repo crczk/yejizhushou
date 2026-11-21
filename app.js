@@ -6,7 +6,8 @@ const DEVICE_KEY = 'bank-performance-yunduan-device-v1';
 const PENDING_SESSION_RELEASE_KEY = 'bank-performance-yunduan-pending-session-release-v1';
 const REMOTE_SESSION_TTL_MS = 30 * 60 * 1000;
 const REMOTE_SESSION_TOUCH_INTERVAL_MS = 8 * 60 * 1000;
-const APP_VERSION = '30.0';
+const APP_VERSION = '31.4';
+const RECORD_DRAFT_KEY = 'bank-performance-record-draft-v31';
 try {
   if (window.AndroidBridge || window.Android) document.documentElement.classList.add('native-android');
   if (new URLSearchParams(location.search).get('desktop') === 'windows') document.documentElement.classList.add('native-windows');
@@ -50,6 +51,7 @@ const defaultData = () => {
     deletedUsers: [],
     deletedMembers: [],
     coreSummaries: [],
+    performanceManager: { staff: [], types: [], updatedAt: '' },
     updatedAt: now
   };
 };
@@ -63,6 +65,393 @@ let syncMeta = loadSyncMeta();
 let syncTimer = null;
 let syncInFlight = false;
 let accountSessionOperation = null;
+let managerUnlockedFor = '';
+let managerUnlockedHash = '';
+
+
+function savedRecordDraft() {
+  try { return JSON.parse(sessionStorage.getItem(RECORD_DRAFT_KEY) || '{}') || {}; } catch { return {}; }
+}
+function snapshotRecordDraft() {
+  const f = document.getElementById('recordForm');
+  if (!f) return;
+  const fd = new FormData(f);
+  const draft = Object.fromEntries(['memberId','typeId','value','date','remark'].map(k => [k, String(fd.get(k) || '')]));
+  sessionStorage.setItem(RECORD_DRAFT_KEY, JSON.stringify(draft));
+}
+function clearRecordDraft() { sessionStorage.removeItem(RECORD_DRAFT_KEY); }
+function restoreRecordDraft() {
+  const f = document.getElementById('recordForm'); if (!f) return;
+  const d = savedRecordDraft();
+  const member = f.elements.namedItem('memberId');
+  if (member && d.memberId && [...(member.options || [])].some(o => o.value === d.memberId)) member.value = d.memberId;
+  const type = f.elements.namedItem('typeId');
+  if (type) {
+    type.innerHTML = typeSelectOptions('', member?.value || currentUser()?.memberId || '', true);
+    if ([...type.options].some(o => o.value === d.typeId)) type.value = d.typeId;
+  }
+  ['value','date','remark'].forEach(k => { const el=f.elements.namedItem(k); if (el && d[k] !== undefined) el.value=d[k]; });
+}
+function recordApproved(r) { return r.reviewStatus !== 'pending' && r.reviewStatus !== 'rejected'; }
+function validRecords(records) { return (records || []).filter(recordApproved); }
+function managerConfig() { return state.performanceManager || { staff: [], types: [], updatedAt: '' }; }
+function managerTypes() { return (managerConfig().types || []).filter(t => t.active !== false).slice().sort((a,b) => Number(a.sortOrder||0)-Number(b.sortOrder||0)); }
+function managerMatchType(text) {
+  // Only the explicit keyword list is eligible. Never fuzzy/sub-string match,
+  // and never implicitly add the manager category's own name.
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  return managerTypes().find(t => (t.keywords || []).some(k => String(k || '').trim() === raw)) || null;
+}
+function managerTypeForRecord(r, apply) {
+  const original = typeById(r.typeId);
+  return apply ? managerMatchType(original?.name || '') : null;
+}
+function managerMonthData(month, apply, external = null) {
+  // All remote owners are loaded before this routine; never scope to the logged-in user.
+  const records = validRecords(external === null ? state.records : external).filter(r =>
+    external !== null || !month || !r.date || String(r.date).startsWith(month));
+  const byName = new Map((state.members || []).map(m => [m.id, String(m.name || '').trim()]));
+  const byType = new Map((state.types || []).map(t => [t.id, t]));
+  const preferred = apply ? (managerConfig().staff || []).map(s => String(s).trim()).filter(Boolean) : [];
+  const getName = r => String(r.importName || byName.get(r.memberId) || r.memberName || '').trim();
+  const getType = r => String(r.originalTypeName || byType.get(r.typeId)?.name || r.typeName || '').trim();
+  const unique = items => [...new Set(items.filter(Boolean))];
+  // Configured staff are always first, even when they have zero records.
+  const names = unique([...preferred, ...records.map(getName)]);
+  const members = names.map((name, i) => ({ id: 'manager_staff_' + i, name }));
+  const nameIds = new Map(members.map(m => [m.name, m.id]));
+  const configuredTypes = apply ? managerTypes() : [];
+  const matched = new Map();
+  const unmatched = [];
+  const originalNames = unique(records.map(getType));
+  originalNames.forEach(name => {
+    const hit = configuredTypes.length ? managerMatchType(name) : null;
+    if (hit) matched.set(name, hit);
+    else unmatched.push(name);
+  });
+  // A rule only absorbs matching records. Unmatched database categories remain visible.
+  // Even if a raw category shares the manager display name, it must not merge
+  // without an explicitly configured keyword. Keep its ID separate.
+  const fallbackTypes = unmatched.map((name, i) => {
+    const found = [...byType.values()].find(t => t.name === name);
+    const sourceRecord = records.find(r => getType(r) === name);
+    return { id: 'manager_raw_type_' + i, name, price: found?.price ?? null, unit: sourceRecord?.unit || found?.unit || '项', sortOrder: configuredTypes.length + i + 1 };
+  });
+  const types = [...configuredTypes.map(t => ({ ...t, price: t.price ?? 0 })), ...fallbackTypes];
+  const fallbackByName = new Map(fallbackTypes.map(t => [t.name, t]));
+  const totals = new Map(), ignored = [];
+  records.forEach(r => {
+    const name = getName(r), rawType = getType(r);
+    const type = matched.get(rawType) || fallbackByName.get(rawType);
+    if (!nameIds.has(name) || !type) { ignored.push(r); return; }
+    const key = nameIds.get(name) + '@@' + type.id;
+    totals.set(key, (totals.get(key) || 0) + Number(r.value || 0));
+  });
+  return { members, types, totals, ignored };
+}
+
+async function openManager() {
+  if(!requireAuth())return;
+  if(cloudReady() && navigator.onLine !== false){
+    try {
+      const remote=await getRemoteJson(publicFilePath());
+      if(remote?.data?.performanceManager){
+        state.performanceManager=normalizeManager(remote.data.performanceManager);
+        saveLocal(false);
+      }
+    }catch(err){ console.error(err);showToast('无法取得最新管家配置，请检查网络');return; }
+  }
+  const hash=managerConfig().accessCodeHash || '';
+  if(!isAdmin()){
+    if(!hash){showToast('管理员尚未设置管家口令，请联系管理员');return;}
+    const key=currentUser()?.id || '';
+    if(managerUnlockedFor!==key || managerUnlockedHash!==hash){
+      const input=window.prompt('请输入管理员设置的管家口令');
+      if(input===null)return;
+      if(await hashPassword(input)!==hash){showToast('管家口令错误');return;}
+      managerUnlockedFor=key;managerUnlockedHash=hash;
+    }
+  }
+  page='manager';render();
+}
+
+function normalizeManager(raw) {
+  const d = raw && typeof raw === 'object' ? raw : {};
+  return {
+    staff: Array.isArray(d.staff) ? [...new Set(d.staff.map(x=>String(x).trim()).filter(Boolean))].slice(0,2000) : [],
+    types: Array.isArray(d.types) ? d.types.map((x,i)=>({ id:String(x.id||'manager_'+i),name:String(x.name||'').trim(),price:Math.max(0,Number(x.price)||0),unit:String(x.unit||'项').trim()||'项',keywords:Array.isArray(x.keywords)?x.keywords.map(k=>String(k).trim()).filter(Boolean):[],sortOrder:Number(x.sortOrder)||i+1,active:x.active!==false })).filter(t=>t.name).slice(0,1000) : [],
+    accessCodeHash: String(d.accessCodeHash || ''),
+    updatedAt: String(d.updatedAt || '')
+  };
+}
+function orderedManagerTxtSummary(records) {
+  const totals = new Map(), fallback = new Map();
+  for (const r of validRecords(records)) {
+    const raw = typeById(r.typeId) || {name:r.originalTypeName||r.typeName||'未知类型',unit:r.unit||'项'};
+    const t = managerMatchType(raw.name) || raw;
+    const id = managerMatchType(raw.name) ? 'manager:' + t.id : 'raw:' + raw.name;
+    if (!totals.has(id)) totals.set(id, {type:{...t,unit:t.unit||raw.unit||'项'},value:0});
+    totals.get(id).value += Number(r.value || 0);
+  }
+  return [...totals.values()].sort((a,b)=>(Number(a.type.sortOrder||999999)-Number(b.type.sortOrder||999999)) || String(a.type.name).localeCompare(String(b.type.name),'zh-CN'));
+}
+function reviewQueueTpl() {
+  const pending = (state.records||[]).filter(r=>r.reviewStatus==='pending');
+  return pending.length ? `<p class="muted">${pending.length} 笔待审核。审核通过后才计入日报、月报和导出。</p><div class="list">${pending.map(r=>{
+    const type=typeById(r.typeId), member=memberById(r.memberId);
+    return `<div class="item"><div><strong>${safeHtml(member?.name||'未知人员')} · ${safeHtml(type?.name||'未知类型')}</strong><div class="item-sub">${safeHtml(r.date)} · 数量 ${safeHtml(r.value)} · ${safeHtml(r.remark||'')}</div></div><div class="row wrap"><button class="soft small" data-review="${r.id}" data-decision="approved">通过</button><button class="danger small" data-review="${r.id}" data-decision="rejected">驳回</button></div></div>`;
+  }).join('')}</div>` : '<div class="empty">暂无待审核业绩</div>';
+}
+function managerTpl() {
+ const d=managerConfig(),list=managerTypes();
+ return `<section class="card"><div class="section-title"><h2>业绩管家</h2><button id="backManagerBtn" class="ghost small">返回我的页面</button></div>
+ <p class="muted">管理员直接进入，其他账号验证管家口令后进入。点击保存后共享到云端所有客户端。包含列表仅按完整业绩类型名称精确匹配（不模糊、不按子串匹配）；未在包含列表中的类型保持原名。重复配置时按类型排序优先。</p>
+ ${isAdmin() ? `<form id="managerCodeForm" class="field"><label>管理员设置管家口令（至少4位，保存后立即生效）</label><div class="row wrap"><input id="managerNewCode" type="password" minlength="4" autocomplete="new-password" placeholder="填写新口令"><button class="soft small" type="submit">更新口令</button></div><small class="muted">普通用户进入时必须验证；请通过安全渠道通知相关人员。</small></form>` : ''}
+ <form id="managerForm"><div class="field"><label>业绩人员名单（每行一个姓名）</label><textarea id="managerStaff" rows="5" placeholder="张三&#10;李四">${safeHtml((d.staff||[]).join('\n'))}</textarea></div>
+ <div class="section-title"><h3>业绩类型、单价及包含关键词</h3><button id="managerAddType" type="button" class="ghost small">新增类型</button></div>
+ <div id="managerTypeRows">${list.map((t,i)=>managerTypeRow(t,i)).join('')}</div>
+ <button class="primary full" type="submit">保存并共享所有用户</button></form></section>
+ <section class="card"><div class="section-title"><h2>生成本月汇总 XLSX</h2><span class="pill">单次选择</span></div>
+ <div class="field"><label>统计月份</label><input id="managerMonth" type="month" value="${monthStr()}"></div>
+ <label class="manager-check"><input id="managerApply" type="checkbox" checked> 本次使用业绩管家设置（不影响下次）</label>
+ <button id="managerCloudExport" class="primary full">读取云端全员数据并生成 Excel</button>
+ <div class="field"><label>导入员工 TXT 文件（可多选）</label><input id="managerTxtFiles" type="file" accept=".txt,text/plain" multiple></div>
+ <p class="muted">格式：首行“姓名：张三”；后续每行“业绩类型，数量”或“业绩类型#数量”。自动跳过空行及“业绩：”。不修改任何员工原始记录。</p>
+ <button id="managerTxtExport" class="soft full">导入 TXT 并生成 Excel</button><p class="muted" id="managerImportStatus"></p></section>`;
+}
+function managerTypeRow(t,i) {
+ return `<div class="manager-type-row" data-mid="${safeHtml(t.id)}"><div class="field"><label>类型名称</label><input data-field="name" value="${safeHtml(t.name)}" placeholder="例：信用卡"></div><div class="field"><label>单价（元）</label><input data-field="price" type="number" min="0" step="0.01" value="${Number(t.price||0)}"></div><div class="field"><label>合并后单位</label><input data-field="unit" value="${safeHtml(t.unit||'项')}" placeholder="例：张"></div><div class="field"><label>包含业绩类型（完整名称，以逗号/换行分隔，精确匹配）</label><textarea data-field="keywords" rows="2" placeholder="信用卡,办卡">${safeHtml((t.keywords||[]).join('，'))}</textarea></div><div class="row wrap"><button type="button" class="ghost small" data-move="up">上移</button><button type="button" class="ghost small" data-move="down">下移</button><button type="button" class="danger small" data-remove-manager>删除</button></div></div>`;
+}
+function collectManagerForm() {
+ const rows=[...document.querySelectorAll('#managerTypeRows .manager-type-row')];
+ const types=rows.map((el,i)=>({id:el.dataset.mid||uid(),name:el.querySelector('[data-field="name"]').value.trim(),price:Number(el.querySelector('[data-field="price"]').value||0),unit:el.querySelector('[data-field="unit"]').value.trim()||'项',keywords:el.querySelector('[data-field="keywords"]').value.split(/[,，#\n;；]+/).map(x=>x.trim()).filter(Boolean),sortOrder:i+1,active:true}));
+ if(types.some(t=>!t.name||!Number.isFinite(t.price)||t.price<0)) throw new Error('类型名称不能为空，单价必须为非负数字');
+ if(new Set(types.map(t=>t.name)).size!==types.length) throw new Error('业绩类型名称不能重复');
+ return normalizeManager({staff:document.getElementById('managerStaff').value.split(/\r?\n/),types,accessCodeHash:managerConfig().accessCodeHash,updatedAt:new Date().toISOString()});
+}
+async function shareManager() {
+ // Separate public manager update prevents a regular member from rewriting accounts/pricing.
+ if (!cloudReady() || navigator.onLine===false) { showToast('配置已保存本地；联网后请再次点击保存并共享'); return; }
+ const local = normalizeManager(state.performanceManager);
+ try {
+  await updateRemoteJsonWithRetry(publicFilePath(),remote=>{
+    if(!remote) throw new Error('云端公共数据尚未初始化');
+    return {...remote,performanceManager:{...local, accessCodeHash: isAdmin() ? local.accessCodeHash : String(remote.performanceManager?.accessCodeHash || '')},updatedAt:new Date().toISOString()};
+  },`update manager configuration ${currentUser()?.id||''}`);
+  showToast('业绩管家配置已共享到所有用户端');
+ } catch(e) { console.error(e); showToast('配置已保存本机，云端共享失败，请重新保存'); }
+}
+function parsePerformanceTxt(content, filename='') {
+  const lines = String(content || '').replace(/^\ufeff/, '').split(/\r?\n/);
+  const first = lines.find(l => l.trim());
+  const match = /^姓名\s*[：:]\s*(.+)$/.exec((first || '').trim());
+  if (!match) throw new Error(`${filename || 'TXT'}：首行必须为“姓名：xxx”`);
+  const name = match[1].trim(), results = [], errors = [];
+  let seenName = false;
+  lines.forEach((raw, i) => {
+    const line = raw.trim();
+    if (!line) return;
+    if (!seenName) { seenName = true; return; }
+    const fields = line.split(/[，,＃#]/).map(v => v.trim());
+    if (fields.length === 3 && fields[0] === '业绩类型' &&
+        (fields[1] === '数量或者金额' || fields[1] === '数量或金额') && fields[2] === '单位') return;
+    if (fields.length !== 3 || !fields[0] || !fields[1] || !fields[2]) { errors.push(i + 1); return; }
+    const value = Number(fields[1]);
+    if (!Number.isFinite(value) || value < 0) { errors.push(i + 1); return; }
+    results.push({importName:name,originalTypeName:fields[0],value,unit:fields[2],date:monthStr()+'-01'});
+  });
+  return {name,results,errors};
+}
+function exportManagerData(month, apply, raw, filename) {
+ const {members,types,totals,ignored}=managerMonthData(month,apply,raw);
+ if(!members.length||!types.length) {showToast('需要先设置人员和业绩类型，或取消管家设置使用原始人员类型');return;}
+ downloadBlob(filename,buildMonthlySummaryXlsx(month,members,types,totals));
+ showToast(`已生成 Excel：${members.length} 人，${types.length} 类；${ignored.length} 笔未匹配项目未入表`);
+}
+async function exportManagerCloud(scope = 'all') {
+ if(!requireAuth())return;
+ if(scope==='all' && !isAdmin() && (page!=='manager' || managerUnlockedFor!==currentUser()?.id || managerUnlockedHash!==managerConfig().accessCodeHash)){showToast('请先验证管家口令进入业绩管家');return;}
+ const apply=!!document.getElementById('useManagerOneTime')?.checked || !!document.getElementById('managerApply')?.checked;
+ const month=document.getElementById('managerMonth')?.value || window.__selectedMonth || monthStr();
+ if(!(await syncLatestBeforeExport()))return;
+ // A user only obtains the all-user export in the manager's isolated workflow.
+ const raw=validRecords(state.records).filter(r=>r.date?.startsWith(month) && (scope==='all' || r.memberId===currentUser()?.memberId));
+ exportManagerData(month,apply,raw,`${month}_业绩管家全员汇总.xlsx`);
+}
+function bindManagerPage() {
+ const back=document.getElementById('backManagerBtn'); if(back)back.onclick=()=>{page='settings';render();};
+ const codeForm=document.getElementById('managerCodeForm');
+ if(codeForm)codeForm.onsubmit=async e=>{
+   e.preventDefault();if(!isAdmin())return;
+   const code=document.getElementById('managerNewCode')?.value||'';
+   if(code.length<4){showToast('管家口令至少4位');return;}
+   const hash=await hashPassword(code);
+   state.performanceManager={...normalizeManager(managerConfig()),accessCodeHash:hash,updatedAt:new Date().toISOString()};
+   saveLocal(false);await shareManager();document.getElementById('managerNewCode').value='';
+ };
+ const form=document.getElementById('managerForm');
+ if(form) {
+  const rows=document.getElementById('managerTypeRows');
+  document.getElementById('managerAddType').onclick=()=>{rows.insertAdjacentHTML('beforeend',managerTypeRow({id:uid(),name:'',price:0,keywords:[]},rows.children.length));};
+  rows.onclick=e=>{
+   const btn=e.target.closest('button');if(!btn)return;
+   const row=btn.closest('.manager-type-row');if(!row)return;
+   if(btn.hasAttribute('data-remove-manager'))row.remove();
+   if(btn.dataset.move==='up' && row.previousElementSibling)rows.insertBefore(row,row.previousElementSibling);
+   if(btn.dataset.move==='down' && row.nextElementSibling)rows.insertBefore(row.nextElementSibling,row);
+  };
+  form.onsubmit=async e=>{e.preventDefault();try {state.performanceManager=collectManagerForm();saveLocal(false);await shareManager();}catch(err){showToast(String(err.message||err));}};
+ }
+ const cloud=document.getElementById('managerCloudExport');if(cloud)cloud.onclick=exportManagerCloud;
+ const txt=document.getElementById('managerTxtExport');if(txt)txt.onclick=async()=>{
+  const files=[...(document.getElementById('managerTxtFiles')?.files||[])];
+  if(!files.length){showToast('请选择一个或多个 TXT 文件');return;}
+  const all=[];const problems=[];
+  for(const file of files){
+   try {const parsed=parsePerformanceTxt(await file.text(),file.name);all.push(...parsed.results);if(parsed.errors.length)problems.push(`${file.name} 第${parsed.errors.join('、')}行`);}catch(e){problems.push(String(e.message));}
+  }
+  document.getElementById('managerImportStatus').textContent=`已识别 ${all.length} 行。${problems.length?'跳过：'+problems.join('；'):''}`;
+  if(!all.length){showToast('未识别到有效业绩记录');return;}
+  const month=document.getElementById('managerMonth').value||monthStr();
+  const apply=!!document.getElementById('managerApply').checked;
+  // Imported TXT has its own member/type name; no database write.
+  const oldMembers=state.members,oldTypes=state.types;
+  if(!apply) {
+    const names=[...new Set(all.map(r=>r.importName))];
+    const namesTypes=[...new Set(all.map(r=>r.originalTypeName))];
+    state.members=names.map((name,i)=>({id:'import_member_'+i,name,active:true}));
+    state.types=namesTypes.map((name,i)=>({id:'import_type_'+i,name,unit:all.find(r=>r.originalTypeName===name)?.unit||'项',sortOrder:i+1,price:0,active:true,scope:'global'}));
+    all.forEach(r=>{r.memberId=state.members.find(m=>m.name===r.importName).id;r.typeId=state.types.find(t=>t.name===r.originalTypeName).id;});
+  }
+  try {exportManagerData(month,apply,all,`${month}_TXT业绩汇总.xlsx`);}finally{state.members=oldMembers;state.types=oldTypes;}
+ };
+}
+
+
+// v31.4: client-only quick tools. These never change state.records or cloud data.
+let quickToolsReturnPage = 'home';
+let quickToolDraft = { text: '', month: monthStr(), rules: [], preview: null };
+function openQuickTools() {
+  if (!requireAuth()) return;
+  if (page !== 'quicktools') quickToolsReturnPage = page === 'manager' ? 'settings' : page;
+  page = 'quicktools'; render();
+}
+function closeQuickTools() { page = quickToolsReturnPage || 'home'; render(); }
+function parseQuickPerformanceText(content) {
+  const lines = String(content || '').replace(/^\ufeff/, '').split(/\r?\n/);
+  const records = [], errors = [], names = [];
+  let person = '';
+  lines.forEach((raw, idx) => {
+    const line = raw.trim();
+    if (!line) return;
+    const match = /^姓名\s*[：:]\s*(.+)$/.exec(line);
+    if (match) {
+      person = match[1].trim();
+      if (!person) errors.push(`第${idx + 1}行：姓名不能为空`);
+      else if (!names.includes(person)) names.push(person);
+      return;
+    }
+    if (/^业绩\s*[：:]\s*$/.test(line)) return;
+    const fields = line.split(/[，,＃#]/).map(s => s.trim());
+    if (fields.length === 3 && fields[0] === '业绩类型' && ['数量或者金额','数量或金额'].includes(fields[1]) && fields[2] === '单位') return;
+    if (!person) { errors.push(`第${idx + 1}行：请先填写“姓名：xxx”`); return; }
+    if (fields.length !== 3 || fields.some(s => !s)) { errors.push(`第${idx + 1}行：应为“类型，数值，单位”`); return; }
+    const val = Number(fields[1]);
+    if (!Number.isFinite(val) || val < 0) { errors.push(`第${idx + 1}行：数量或金额无效`); return; }
+    records.push({importName: person, originalTypeName:fields[0],value:val,unit:fields[2]});
+  });
+  return {names,records,errors};
+}
+function normalizeQuickRules(raw) {
+  const rules=[];
+  for (const entry of raw || []) {
+    const name=String(entry.name||'').trim();
+    const keywords=[...new Set((Array.isArray(entry.keywords)?entry.keywords:String(entry.keywords||'').split(/[,，#\n;；]+/)).map(s=>String(s).trim()).filter(Boolean))];
+    if (!name && !keywords.length) continue;
+    if (!name || !keywords.length) throw new Error('每项包含规则必须填写汇总类型和至少一个完整原始类型名称');
+    if (rules.some(r=>r.name===name)) throw new Error('汇总类型名称不能重复');
+    rules.push({name,keywords,unit:String(entry.unit||'').trim()});
+  }
+  return rules;
+}
+function quickSummary(parsed, rules) {
+  const members=parsed.names.map((name,i)=>({id:'quick_member_'+i,name}));
+  const memberIds=new Map(members.map(m=>[m.name,m.id]));
+  // Only explicit keyword equality merges types; no substring or automatic rule-title matching.
+  const allTypes=[], typeMap=new Map(), totals=new Map();
+  rules.forEach((r,i)=>{
+    const id='quick_group_'+i;
+    const type={id,name:r.name,unit:r.unit||'项',price:0};
+    allTypes.push(type);typeMap.set(id,type);
+  });
+  parsed.records.forEach(r=>{
+    const ruleIndex=rules.findIndex(x=>x.keywords.includes(r.originalTypeName));
+    const key=ruleIndex>=0?'quick_group_'+ruleIndex:'quick_raw_'+r.originalTypeName+'\u0000'+r.unit;
+    if(!typeMap.has(key)) {
+      const type={id:key,name:r.originalTypeName,unit:r.unit,price:0};
+      allTypes.push(type);typeMap.set(key,type);
+    }
+    if(ruleIndex>=0 && !rules[ruleIndex].unit) typeMap.get(key).unit=r.unit;
+    const totalKey=memberIds.get(r.importName)+'@@'+key;
+    totals.set(totalKey,(totals.get(totalKey)||0)+r.value);
+  });
+  return {members,types:allTypes,totals};
+}
+function quickToolTpl() {
+  const d=quickToolDraft;
+  return `<section class="card"><div class="section-title"><h2>便捷工具</h2><button id="quickBackBtn" class="ghost small" type="button">返回原页面</button></div>
+    <p class="muted">无需管家口令，所有已登录用户均可使用。只处理本次粘贴的文本，不修改原有记录或云端设置。</p>
+    <div class="quick-tool-list"><button id="quickTextOpen" class="primary quick-tool-big" type="button">📋 文本业绩汇总统计 <span>粘贴多人业绩 · 精确包含 · 月汇总 Excel</span></button></div></section>
+    <section class="card" id="quickTextPanel" style="display:none"><div class="section-title"><h2>文本业绩汇总统计</h2><span class="pill">仅本次有效</span></div>
+    <div class="field"><label for="quickMonth">汇总月份</label><input id="quickMonth" type="month" value="${safeHtml(d.month||monthStr())}"></div>
+    <div class="field"><label for="quickInput">粘贴业绩文本（可连续填写多个人）</label><textarea id="quickInput" rows="12" spellcheck="false" placeholder="姓名：张三&#10;业绩：&#10;吸金，10，万&#10;姓名：李四&#10;业绩：&#10;吸金，15，万">${safeHtml(d.text)}</textarea></div>
+    <div class="section-title"><h3>自定义包含关系</h3><button id="quickAddRule" type="button" class="soft small">+ 新增规则</button></div>
+    <p class="muted">仅当原始业绩类型的完整名称与包含列表中某一项完全相同时才归并。未列出的类型保持文本原名和单位；规则不上传云端。</p>
+    <div id="quickRuleRows">${d.rules.map(quickRuleRow).join('')}</div>
+    <button id="quickGenerate" type="button" class="primary full">生成月汇总 Excel</button>
+    <p class="muted" id="quickStatus" role="status"></p><div id="quickPreview"></div></section>`;
+}
+function quickRuleRow(r={name:'',unit:'',keywords:[]}) {
+  return `<div class="quick-rule-row"><div class="field"><label>归并后的业绩类型</label><input data-quick="name" placeholder="例：吸金合计" value="${safeHtml(r.name||'')}"></div><div class="field"><label>包含的完整原始类型（逗号或换行分隔）</label><textarea rows="2" data-quick="keywords" placeholder="吸金，储蓄">${safeHtml((r.keywords||[]).join('，'))}</textarea></div><div class="field"><label>归并后单位（选填）</label><input data-quick="unit" placeholder="例：万" value="${safeHtml(r.unit||'')}"></div><button type="button" class="danger small" data-quick-remove>删除此规则</button></div>`;
+}
+function captureQuickDraft() {
+  const panel=document.getElementById('quickTextPanel');if(!panel)return;
+  quickToolDraft.text=document.getElementById('quickInput')?.value||'';
+  quickToolDraft.month=document.getElementById('quickMonth')?.value||monthStr();
+  quickToolDraft.rules=[...document.querySelectorAll('.quick-rule-row')].map(row=>({
+    name:row.querySelector('[data-quick="name"]').value,
+    unit:row.querySelector('[data-quick="unit"]').value,
+    keywords:row.querySelector('[data-quick="keywords"]').value.split(/[,，#\n;；]+/).map(x=>x.trim()).filter(Boolean)
+  }));
+}
+function bindQuickToolPage() {
+  const back=document.getElementById('quickBackBtn');if(back)back.onclick=()=>{captureQuickDraft();closeQuickTools();};
+  const btn=document.getElementById('quickTextOpen');
+  const panel=document.getElementById('quickTextPanel');
+  if (!btn||!panel) return;
+  btn.onclick=()=>{panel.style.display=panel.style.display==='none'?'':'none';};
+  const rules=document.getElementById('quickRuleRows');
+  document.getElementById('quickAddRule').onclick=()=>rules.insertAdjacentHTML('beforeend',quickRuleRow());
+  rules.onclick=e=>{const target=e.target.closest('[data-quick-remove]');if(target)target.closest('.quick-rule-row')?.remove();};
+  document.getElementById('quickGenerate').onclick=()=>{
+    captureQuickDraft();
+    const status=document.getElementById('quickStatus');
+    const preview=document.getElementById('quickPreview');
+    try {
+      if(!quickToolDraft.month)throw new Error('请先选择汇总月份');
+      const parsed=parseQuickPerformanceText(quickToolDraft.text);
+      if(parsed.errors.length){status.textContent='文本格式有误：'+parsed.errors.slice(0,15).join('；');return;}
+      if(!parsed.records.length)throw new Error('没有识别到有效业绩，请按“姓名：张三 / 业绩： / 吸金，10，万”填写');
+      const normalized=normalizeQuickRules(quickToolDraft.rules);
+      const result=quickSummary(parsed,normalized);
+      const file=buildMonthlySummaryXlsx(quickToolDraft.month,result.members,result.types,result.totals,true);
+      downloadBlob(`${quickToolDraft.month}_文本业绩月汇总.xlsx`,file);
+      status.textContent=`成功汇总 ${result.members.length} 人、${parsed.records.length} 笔业绩、${result.types.length} 类；Excel 已生成。`;
+      preview.innerHTML=`<div class="quick-preview-scroll"><table class="quick-preview-table"><thead><tr><th>人员</th>${result.types.map(t=>`<th>${safeHtml(t.name)}（${safeHtml(t.unit)}）</th>`).join('')}</tr></thead><tbody>${result.members.map(m=>`<tr><th>${safeHtml(m.name)}</th>${result.types.map(t=>`<td>${Number(result.totals.get(m.id+'@@'+t.id)||0)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+    }catch(err){status.textContent=String(err.message||err);preview.innerHTML='';}
+  };
+}
 
 function uid() {
   return 'id_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
@@ -522,6 +911,7 @@ function canAccessRecord(r, user = currentUser()) {
   return isAdmin(user) || r.memberId === user.memberId;
 }
 function accessibleRecords(records = state.records, user = currentUser()) {
+  records = validRecords(records);
   if (!user) return [];
   return isAdmin(user) ? records : records.filter(r => r.memberId === user.memberId);
 }
@@ -625,7 +1015,7 @@ function coreSummaryTpl(date = todayStr()) {
   if (!groups.length) return `<div class="empty">管理员尚未配置业绩核心汇总大类</div>`;
   return `<div class="core-summary-list">${groups.map(group => {
     const ids = new Set(group.typeIds || []);
-    const records = (state.records || []).filter(r => r.date === date && ids.has(r.typeId));
+    const records = validRecords(state.records).filter(r => r.date === date && ids.has(r.typeId));
     const mergedItems = memberTypeSummary(records);
     const typeItems = typeSummary(records);
     const showAggregateAmount = canViewAggregateAmounts(records);
@@ -642,6 +1032,14 @@ function renderHeader() {
   const title = document.querySelector('.topbar h1');
   const syncBtn = document.getElementById('syncBtn');
   if (!eyebrow || !title || !syncBtn) return;
+  const quickBtn=document.getElementById('quickHeaderBtn');
+  const quickBack=document.getElementById('quickHeaderBackBtn');
+  if(quickBtn)quickBtn.style.display=user && page!=='quicktools'?'':'none';
+  if(quickBack)quickBack.style.display=user && page==='quicktools'?'':'none';
+  const mgrBtn=document.getElementById('managerHeaderBtn');
+  const backBtn=document.getElementById('managerBackBtn');
+  if(mgrBtn)mgrBtn.style.display=user && page!=='manager' && page!=='quicktools'?'':'none';
+  if(backBtn)backBtn.style.display=user && page==='manager'?'':'none';
   title.textContent = '业绩助手';
   if (!user) {
     eyebrow.textContent = '账号登录 · 权限隔离版';
@@ -657,8 +1055,9 @@ function render() {
   const user = currentUser();
   document.body.classList.toggle('auth-mode', !user);
   const tabbar = document.querySelector('.tabbar');
-  if (tabbar) tabbar.style.display = user ? 'grid' : 'none';
+  if (tabbar) tabbar.style.display = user && !['manager','quicktools'].includes(page) ? 'grid' : 'none';
   renderHeader();
+  if(document.getElementById('recordForm')) snapshotRecordDraft();
   const view = document.getElementById('view');
   if (!user) {
     view.innerHTML = authTpl();
@@ -672,7 +1071,13 @@ function render() {
   if (page === 'day') view.innerHTML = dayTpl();
   if (page === 'month') view.innerHTML = monthTpl();
   if (page === 'settings') view.innerHTML = settingsTpl();
+  if (page === 'quicktools') view.innerHTML = quickToolTpl();
+  if (page === 'manager') {
+    if(!isAdmin() && (managerUnlockedFor!==user.id || managerUnlockedHash!==managerConfig().accessCodeHash)) {page='settings';view.innerHTML=settingsTpl();showToast('请先验证管家口令');}
+    else view.innerHTML=managerTpl();
+  }
   bindPage();
+  if(page==='quicktools') bindQuickToolPage();
 }
 function memberFilterTpl(id = 'memberFilter', includeAll = true, value = currentMemberFilter()) {
   if (!isAdmin()) return `<span class="pill">我的数据</span>`;
@@ -728,41 +1133,17 @@ function authTpl() {
 function moduleView(pageName) {
   return String((window.__moduleViews || {})[pageName] || (window.__moduleDefaults || {})[pageName] || '');
 }
-function moduleHubTpl(pageName, title, modules, subtitle = '从下拉框选择需要的功能板块，内容会直接显示在下方。') {
-  const available = Array.isArray(modules) ? modules.filter(m => m && m.id) : [];
-  const ids = new Set(available.map(m => String(m.id)));
-  let active = moduleView(pageName);
-  if (!ids.has(active)) active = String(available[0]?.id || '');
-  window.__moduleDefaults = { ...(window.__moduleDefaults || {}), [pageName]: active };
-  const stored = String((window.__moduleViews || {})[pageName] || '');
-  if (stored !== active) {
-    window.__moduleViews = { ...(window.__moduleViews || {}), [pageName]: active };
-  }
-  const current = available.find(m => String(m.id) === active) || available[0];
-  return `<section class="card module-hub">
-    <div class="section-title"><h2>${safeHtml(title)}</h2><span class="pill">下拉选择</span></div>
-    <p class="muted">${safeHtml(subtitle)}</p>
-    <div class="module-select-field">
-      <label id="moduleSelectLabel_${safeHtml(pageName)}">选择功能板块</label>
-      <div class="module-select-shell" data-module-dropdown data-module-page="${safeHtml(pageName)}">
-        <button class="module-select-trigger" type="button" data-module-trigger aria-haspopup="listbox" aria-expanded="false" aria-labelledby="moduleSelectLabel_${safeHtml(pageName)} moduleSelectText_${safeHtml(pageName)}">
-          <span class="module-trigger-icon">${safeHtml(current?.icon || '功能')}</span>
-          <span class="module-trigger-copy">
-            <small>当前功能</small>
-            <strong id="moduleSelectText_${safeHtml(pageName)}">${safeHtml(current?.title || '请选择')}</strong>
-          </span>
-          <span class="module-chevron" aria-hidden="true"><i></i><i></i></span>
-        </button>
-        <div class="module-select-menu" data-module-menu role="listbox" aria-label="${safeHtml(title)}">
-          ${available.map(m => `<button type="button" class="module-select-option ${String(m.id) === active ? 'is-selected' : ''}" data-module-option data-module-value="${safeHtml(m.id)}" role="option" aria-selected="${String(m.id) === active ? 'true' : 'false'}">
-            <span class="module-option-icon">${safeHtml(m.icon || '功能')}</span>
-            <span class="module-option-copy"><strong>${safeHtml(m.title)}</strong><small>${safeHtml(m.desc || '')}</small></span>
-            <span class="module-option-check" aria-hidden="true">✓</span>
-          </button>`).join('')}
-        </div>
-      </div>
-    </div>
-    ${current ? `<div class="module-current"><span class="module-icon">${safeHtml(current.icon || '功能')}</span><div><strong>${safeHtml(current.title)}</strong><small>${safeHtml(current.desc || '')}</small></div></div>` : ''}
+function moduleHubTpl(pageName, title, modules) {
+  const available=(Array.isArray(modules)?modules:[]).filter(m=>m&&m.id);
+  let active=moduleView(pageName);
+  if(!available.some(m=>String(m.id)===active))active=String(available[0]?.id||'');
+  window.__moduleDefaults={...(window.__moduleDefaults||{}),[pageName]:active};
+  window.__moduleViews={...(window.__moduleViews||{}),[pageName]:active};
+  const selected=available.find(m=>String(m.id)===active);
+  return `<section class="module-hub module-hub-compact" aria-label="${safeHtml(title)}">
+    <div class="module-tabs" role="tablist" aria-label="${safeHtml(title)}">
+    ${available.map(m=>`<button type="button" class="module-tab ${String(m.id)===active?'active':''}" data-module-tab="${safeHtml(m.id)}" data-module-page="${safeHtml(pageName)}" role="tab" aria-selected="${String(m.id)===active}" title="${safeHtml(m.desc||m.title)}">${safeHtml(m.title)}</button>`).join('')}
+    </div><div class="module-active-label">当前功能：<strong>${safeHtml(selected?.title||'')}</strong></div>
   </section>`;
 }
 function moduleCardTpl(pageName, moduleId, title, content, badge = '', extraClass = '') {
@@ -826,16 +1207,18 @@ function addTpl() {
   const memberField = isAdmin(user)
     ? `<div class="field"><label>成员</label><select id="recordMemberSelect" name="memberId" required>${state.members.map(m => `<option value="${m.id}">${safeHtml(m.name)}${m.role ? ' · ' + safeHtml(m.role) : ''}</option>`).join('')}</select></div>`
     : `<input type="hidden" name="memberId" value="${safeHtml(user.memberId)}"><div class="field"><label>成员</label><div class="readonly-box">${safeHtml(memberById(user.memberId)?.name || user.displayName || user.username)} · 仅记录自己的业绩</div></div>`;
+  const draft = savedRecordDraft();
   return `<section class="card">
     <div class="section-title"><h2>新增业绩记录</h2><span class="muted">登录后按账号自动归属</span></div>
     <form id="recordForm">
       ${memberField}
       <div class="field"><label>业绩类型</label><select id="recordTypeSelect" name="typeId" required>${typeSelectOptions('', isAdmin(user) ? (state.members[0]?.id || '') : user.memberId, true)}</select><div id="recordPriceHint" class="field-hint">请选择业绩类型查看单价</div></div>
       <div class="field"><label>上报数量 / 数值</label><input name="value" type="number" inputmode="decimal" step="0.01" min="0" placeholder="例如 50、3、1" required /></div>
-      <div class="field"><label>日期</label><input id="recordDatePicker" name="date" type="date" value="${todayStr()}" required /></div>
+      <div class="field"><label>日期</label><input id="recordDatePicker" name="date" type="date" value="${safeHtml(draft.date || todayStr())}" required /></div>
       <div class="field"><label>备注</label><textarea name="remark" placeholder="例如：信用卡上报情况。不要填写身份证、银行卡号等敏感信息。"></textarea></div>
       <button class="primary full" type="submit">保存记录</button>
     </form>
+    <p class="muted">待审核的业绩暂不计入有效报表，管理员可在“我的 → 业绩二次审核”处理。</p>
   </section>`;
 }
 function dayTpl() {
@@ -906,6 +1289,8 @@ function settingsTpl() {
     ...(admin ? [{ id: 'members', icon: '成员', title: '成员管理', desc: '新增或维护成员资料' }] : []),
     { id: 'types', icon: '类别', title: admin ? '业绩类型与定价' : '我的业绩类型', desc: admin ? '定价并将个人类别转为公共类别' : '新增和查看个人可用类别' },
     ...(admin ? [{ id: 'core', icon: '核心', title: '核心汇总管理', desc: '维护首页核心汇总大类' }] : []),
+    { id: 'manager', icon: '管家', title: '业绩管家', desc: '管理员直接进入，其他用户须验证管家口令' },
+    ...(admin ? [{ id: 'reviews', icon: '审核', title: '业绩二次审核', desc: '审核待生效的业绩记录' }] : []),
     { id: 'reminder', icon: '提醒', title: '每日录入提醒', desc: '设置每天晚上的任务栏通知时间' },
     { id: 'tools', icon: '工具', title: toolsTitle, desc: '导出数据或清理有权限的记录' },
     { id: 'about', icon: '关于', title: '关于该应用程序', desc: '查看开发者、版本信息和使用说明' }
@@ -930,6 +1315,8 @@ function settingsTpl() {
     <div class="row wrap module-toolbar"><p class="muted">${admin ? '可为公共类型和个人类型定价；个人类型可转为公共类型。管理员删除类型时仅停止后续录入，历史记录、历史月份统计和原定价数据均保留。' : '新增名称时会先匹配公共类型；同名公共类型存在时直接使用。'}</p><button id="addTypeBtn" class="ghost small">${admin ? '新增公共类型' : '新增个人类型'}</button></div>
     <div class="list">${visibleTypes(user).map(typeItem).join('') || `<div class="empty">${admin ? '暂无业绩类型' : '暂无业绩类型，可点击新增类型'}</div>`}</div>`);
   const core = admin ? moduleCardTpl('settings', 'core', '业绩核心汇总管理', `<p class="muted">添加首页展示的大类并勾选包含的业绩类型。所有成员可按日期查看。</p>${coreSummaryManagementTpl()}`, '仅管理员维护') : '';
+  const managerHub = moduleCardTpl('settings', 'manager', '业绩管家', '<p class="muted">配置人员、类型、关键词包含规则和单价，并生成新的 XLSX 汇总。</p><button id="openManagerBtn" class="primary full">进入业绩管家独立页面</button>');
+  const reviews = admin ? moduleCardTpl('settings', 'reviews', '待审核业绩', reviewQueueTpl()) : '';
   const reminder = moduleCardTpl('settings', 'reminder', '每日业绩录入提醒', `
     <p class="muted">开启后，每天到达设置时间时提醒当前设备用户录入当天业绩。本设置只保存在本机，不上传云端。</p>
     <form id="reminderForm" class="reminder-form">
@@ -943,7 +1330,7 @@ function settingsTpl() {
       ${hasNativeReminder() ? '<button id="backgroundTestReminderBtn" class="ghost small" type="button">1 分钟后后台测试</button><button id="notificationSettingsBtn" class="ghost small" type="button">通知设置</button><button id="alarmSettingsBtn" class="ghost small" type="button">精确定时设置</button><button id="batterySettingsBtn" class="ghost small" type="button">后台与电池设置</button>' : ''}
     </div>
     <div class="field-hint">${safeHtml(reminderPlatformHint())}</div>`, '本机设置');
-  const tools = moduleCardTpl('settings', 'tools', toolsTitle, `<div class="row wrap"><button id="exportMonthlySummaryBtn" class="primary" style="${admin ? '' : 'display:none'}">导出当月全员汇总 XLSX</button><button id="exportExcelBtn" class="ghost">导出原有明细 Excel</button><button id="exportCsvBtn" class="ghost">导出 CSV</button><button id="exportTxtBtn" class="ghost">${admin ? '导出所有人 TXT' : '导出我的 TXT'}</button><button id="clearBtn" class="danger">${admin ? '清空全部记录' : '清空我的记录'}</button></div>`);
+  const tools = moduleCardTpl('settings', 'tools', toolsTitle, `<label class="manager-check"><input id="useManagerOneTime" type="checkbox"> 本次导出使用业绩管家设置（仅本次生效）</label><div class="row wrap"><button id="exportMonthlySummaryBtn" class="primary" style="${admin ? '' : 'display:none'}">导出当月全员汇总 XLSX</button><button id="exportExcelBtn" class="ghost">导出原有明细 Excel</button><button id="exportCsvBtn" class="ghost">导出 CSV</button><button id="exportTxtBtn" class="ghost">${admin ? '导出所有人 TXT' : '导出我的 TXT'}</button><button id="clearBtn" class="danger">${admin ? '清空全部记录' : '清空我的记录'}</button></div>`);
   const about = moduleCardTpl('settings', 'about', '关于该应用程序', `
     <div class="about-app">
       <div class="about-app-row"><span>开发者</span><strong>崔子坤</strong></div>
@@ -951,7 +1338,7 @@ function settingsTpl() {
       <div class="about-app-row"><span>当前版本</span><strong>${APP_VERSION}</strong></div>
       <p>该软件仅限内部人员提供便利使用，不作任何商业用途使用，欢迎交流学习。</p>
     </div>`, '内部使用');
-  return `${hub}${account}${sync}${amount}${cloud}${registration}${users}${members}${types}${core}${reminder}${tools}${about}`;
+  return `${hub}${account}${sync}${amount}${cloud}${registration}${users}${members}${types}${core}${managerHub}${reviews}${reminder}${tools}${about}`;
 }
 function coreSummaryManagementTpl() {
   const editingId = window.__editingCoreSummaryId || '';
@@ -1074,7 +1461,7 @@ function typeItem(t) {
   const showAmount = canViewAnyAmount();
   return `<div class="item">
     <div style="flex:1"><div class="item-title"><span class="dot" style="background:${t.color}"></span>${safeHtml(t.name)} ${isAdmin() ? `<span class="pill mini">${safeHtml(typeOwnerName(t))}</span>` : global ? '<span class="pill mini">公共类型</span>' : '<span class="pill mini">个人类型</span>'}</div><div class="item-sub">单位：${safeHtml(t.unit)}${showAmount ? ` · 单价：${priceLabel(t)}` : ' · 金额信息由管理员隐藏'}${mine && !isAdmin() && showAmount ? ' · 由管理员定价' : ''}</div></div>
-    <div class="row wrap">${isAdmin() && !global ? `<button class="primary small" data-promote-type="${t.id}">转为公共</button>` : ''}${isAdmin() ? `<button class="soft small" data-price-type="${t.id}">${typePrice(t) === null ? '设置单价' : '修改单价'}</button>` : ''}${canDelete ? `<button class="danger small" data-delete-type="${t.id}">删除</button>` : ''}</div>
+    <div class="row wrap">${isAdmin() && !global ? `<button class="primary small" data-promote-type="${t.id}">转为公共</button>` : ''}${isAdmin() ? `<button class="soft small" data-review-type="${t.id}">${t.reviewRequired?'关闭审核':'开启审核'}</button><button class="soft small" data-price-type="${t.id}">${typePrice(t) === null ? '设置单价' : '修改单价'}</button>` : ''}${canDelete ? `<button class="danger small" data-delete-type="${t.id}">删除</button>` : ''}</div>
   </div>`;
 }
 function typeItemReadonly(t) {
@@ -1586,6 +1973,17 @@ function bindPage() {
       dropdown.querySelector('[data-module-trigger]')?.setAttribute('aria-expanded', 'false');
     });
   };
+  document.querySelectorAll('.module-tabs').forEach(t=>{t.scrollLeft=Number((window.__moduleScroll||{})[page]||0);});
+  document.querySelectorAll('[data-module-tab]').forEach(btn=>{
+    btn.onclick=()=>{
+      const target=btn.dataset.modulePage||page;
+      const next=btn.dataset.moduleTab;
+      if(!next||moduleView(target)===next)return;
+      window.__moduleScroll={...(window.__moduleScroll||{}),[target]:btn.closest('.module-tabs')?.scrollLeft||0};
+      window.__moduleViews={...(window.__moduleViews||{}),[target]:next};
+      render();
+    };
+  });
   document.querySelectorAll('[data-module-dropdown]').forEach(dropdown => {
     const trigger = dropdown.querySelector('[data-module-trigger]');
     const menu = dropdown.querySelector('[data-module-menu]');
@@ -1660,6 +2058,7 @@ function bindPage() {
   });
   const coreSummaryDatePicker = document.getElementById('coreSummaryDatePicker');
   if (coreSummaryDatePicker) coreSummaryDatePicker.onchange = e => { window.__coreSummaryDate = e.target.value || todayStr(); render(); };
+  restoreRecordDraft();
   const recordMemberSelect = document.getElementById('recordMemberSelect');
   const recordTypeSelect = document.getElementById('recordTypeSelect');
   const updateRecordPriceHint = () => {
@@ -1668,13 +2067,18 @@ function bindPage() {
     if (hint) hint.textContent = !canViewAnyAmount() ? '管理员已隐藏金额信息；业绩数量仍可正常上报' : (t ? `当前单价：${typePrice(t) === null ? '待管理员定价，保存后暂不计入金额' : priceLabel(t)}` : '请选择业绩类型查看单价');
   };
   if (recordMemberSelect && recordTypeSelect) recordMemberSelect.onchange = e => {
+    snapshotRecordDraft();
     recordTypeSelect.innerHTML = typeSelectOptions('', e.target.value, true);
     refreshEnhancedSelect(recordTypeSelect);
     updateRecordPriceHint();
+    snapshotRecordDraft();
   };
-  if (recordTypeSelect) { recordTypeSelect.onchange = updateRecordPriceHint; updateRecordPriceHint(); }
+  if (recordTypeSelect) { recordTypeSelect.onchange = () => { updateRecordPriceHint(); snapshotRecordDraft(); }; updateRecordPriceHint(); }
   const recordForm = document.getElementById('recordForm');
-  if (recordForm) recordForm.onsubmit = e => {
+  if (recordForm) {
+    recordForm.addEventListener('input', snapshotRecordDraft);
+    recordForm.addEventListener('change', snapshotRecordDraft);
+    recordForm.onsubmit = e => {
     e.preventDefault();
     if (!requireAuth('请先登录后再记录业绩')) return;
     const fd = new FormData(recordForm);
@@ -1693,10 +2097,13 @@ function bindPage() {
       remark: fd.get('remark'),
       createdAt: now,
       updatedAt: now,
-      createdBy: user.id
+      createdBy: user.id,
+      reviewStatus: selectedType.reviewRequired ? 'pending' : 'approved',
+      reviewedAt: '', reviewedBy: ''
     });
     saveLocal();
     showToast('已保存，正在自动安全同步');
+    clearRecordDraft();
     recordForm.reset();
     if (recordForm.memberId) recordForm.memberId.value = isAdmin(user) ? (state.members[0]?.id || '') : user.memberId;
     if (recordTypeSelect) recordTypeSelect.innerHTML = typeSelectOptions('', isAdmin(user) ? (state.members[0]?.id || '') : user.memberId, true);
@@ -1706,6 +2113,7 @@ function bindPage() {
     recordForm.date.value = todayStr();
     refreshTemporalControl(recordForm.date);
   };
+  }
   const dayPicker = document.getElementById('dayPicker');
   if (dayPicker) dayPicker.onchange = e => { window.__selectedDate = e.target.value; render(); };
   const monthPicker = document.getElementById('monthPicker');
@@ -1779,6 +2187,7 @@ function bindPage() {
     saveLocal(); render();
     showToast(existingRecordCount ? `类型已删除，${existingRecordCount} 笔历史业绩数据已保留` : '业绩类型已删除');
   });
+  document.querySelectorAll('[data-review-type]').forEach(b=>b.onclick=()=>{if(!isAdmin())return;const t=typeById(b.dataset.reviewType);if(!t)return;t.reviewRequired=!t.reviewRequired;t.updatedAt=new Date().toISOString();saveLocal();render();showToast(t.reviewRequired?'该类型的新记录需要管理员二次审核':'已关闭该类型的新记录审核');});
   document.querySelectorAll('[data-price-type]').forEach(b => b.onclick = () => {
     if (!isAdmin()) { showToast('只有管理员可以设置业绩单价'); return; }
     const t = typeById(b.dataset.priceType);
@@ -1794,15 +2203,44 @@ function bindPage() {
     t.updatedAt = t.pricingUpdatedAt;
     saveLocal(); render(); showToast(`已将 ${t.name} 单价设置为 ${money(value)}`);
   });
-  document.querySelectorAll('[data-delete-member]').forEach(b => b.onclick = () => {
+  document.querySelectorAll('[data-delete-member]').forEach(b => b.onclick = async () => {
     if (!isAdmin()) { showToast('只有管理员可以维护成员'); return; }
-    if (state.records.some(r => r.memberId === b.dataset.deleteMember)) { showToast('该成员已有记录，不能直接删除'); return; }
-    if (state.users.some(u => u.memberId === b.dataset.deleteMember)) { showToast('该成员已关联用户账号，不能直接删除'); return; }
+    const id = b.dataset.deleteMember;
+    const member = state.members.find(m => m.id === id);
+    if (!member) return;
+    if (state.users.some(u => u.memberId === id)) {
+      showToast('该成员关联登录账号：请到「用户账号管理」选择「账号及全部数据永久删除」'); return;
+    }
     if (state.members.length <= 1) { showToast('至少保留一名成员'); return; }
-    if (!confirm('确定删除该成员？')) return;
-    state.members = state.members.filter(m => m.id !== b.dataset.deleteMember);
-    if (window.__memberFilter === b.dataset.deleteMember) window.__memberFilter = 'all';
+    const recordCount = state.records.filter(r => r.memberId === id).length;
+    const message = recordCount
+      ? `确定永久删除成员「${member.name}」及其 ${recordCount} 条历史业绩记录？此操作会同步到云端且不可恢复，建议先备份。`
+      : `确定从本机与云端永久删除成员「${member.name}」？`;
+    if (!confirm(message)) return;
+    if (recordCount && !confirm('再次确认：该成员历史业绩将不再出现在记录和汇总里。确定继续？')) return;
+    const deletedAt = new Date().toISOString(), deletedBy = currentUser()?.id || '';
+    const removedRecords = state.records.filter(r => r.memberId === id);
+    state.deletedRecords = mergeDeletionTombstones(state.deletedRecords || [],
+      removedRecords.map(r => ({ id: r.id, memberId: id, deletedAt, updatedAt: deletedAt, deletedBy })));
+    state.records = state.records.filter(r => r.memberId !== id);
+    state.deletedMembers = mergeDeletionTombstones(state.deletedMembers || [],
+      [{ id, deletedAt, updatedAt: deletedAt, deletedBy }]);
+    state.members = state.members.filter(m => m.id !== id);
+    const removedTypeIds = state.types.filter(t => !isGlobalType(t) && typeOwnerId(t) === id).map(t => t.id);
+    state.types = state.types.filter(t => !removedTypeIds.includes(t.id));
+    if (window.__memberFilter === id) window.__memberFilter = 'all';
     saveLocal(); render();
+    // Persist deletion tombstones to public.json; otherwise cloud merge resurrects members.
+    if (cloudReady() && navigator.onLine !== false) {
+      try {
+        const synced = await pushToYunduan(false);
+        if (!synced) { showToast('本地已删除；云端暂未完成同步，请联网后执行安全同步'); return; }
+        // Orphan synthetic user documents are no longer included in reads.
+        // Remove their file too to avoid retaining a deleted person's old records.
+        await deleteRemoteJson(userFilePath(syntheticOwnerForMember(member)));
+        showToast('成员及历史记录已从本机与云端删除');
+      } catch (err) { console.error(err); showToast('成员已从列表删除；云端清理未完成，请检查网络后重试'); }
+    } else { showToast('本地删除完成；联网后请执行安全同步以更新云端'); }
   });
   const addTypeBtn = document.getElementById('addTypeBtn');
   if (addTypeBtn) addTypeBtn.onclick = () => {
@@ -2058,14 +2496,25 @@ function bindPage() {
   if (pullBtn) pullBtn.onclick = pullFromYunduan;
   const pushBtn = document.getElementById('pushBtn');
   if (pushBtn) pushBtn.onclick = pushToYunduan;
+  const openManagerBtn = document.getElementById('openManagerBtn');
+  if (openManagerBtn) openManagerBtn.onclick = openManager;
+  bindManagerPage();
+  document.querySelectorAll('[data-review]').forEach(b => b.onclick = () => {
+    if (!isAdmin()) return;
+    const r=state.records.find(x=>x.id===b.dataset.review);
+    if (!r || r.reviewStatus !== 'pending') return;
+    r.reviewStatus=b.dataset.decision==='approved'?'approved':'rejected';
+    r.reviewedBy=currentUser().id; r.reviewedAt=new Date().toISOString(); r.updatedAt=r.reviewedAt;
+    saveLocal(); render();
+  });
   const exportMonthlySummaryBtn = document.getElementById('exportMonthlySummaryBtn');
-  if (exportMonthlySummaryBtn) exportMonthlySummaryBtn.onclick = exportMonthlyAllSummaryExcel;
+  if (exportMonthlySummaryBtn) exportMonthlySummaryBtn.onclick = () => document.getElementById('useManagerOneTime')?.checked ? exportManagerCloud() : exportMonthlyAllSummaryExcel();
   const exportExcelBtn = document.getElementById('exportExcelBtn');
-  if (exportExcelBtn) exportExcelBtn.onclick = exportExcel;
+  if (exportExcelBtn) exportExcelBtn.onclick = () => document.getElementById('useManagerOneTime')?.checked ? exportManagerCloud(isAdmin()?'all':'self') : exportExcel();
   const exportCsvBtn = document.getElementById('exportCsvBtn');
-  if (exportCsvBtn) exportCsvBtn.onclick = exportCsv;
+  if (exportCsvBtn) exportCsvBtn.onclick = () => document.getElementById('useManagerOneTime')?.checked ? exportManagerCloud(isAdmin()?'all':'self') : exportCsv();
   const exportTxtBtn = document.getElementById('exportTxtBtn');
-  if (exportTxtBtn) exportTxtBtn.onclick = exportTxt;
+  if (exportTxtBtn) exportTxtBtn.onclick = () => { window.__oneTimeManager = !!document.getElementById('useManagerOneTime')?.checked; exportTxt(); };
   const clearBtn = document.getElementById('clearBtn');
   if (clearBtn) clearBtn.onclick = () => {
     if (!requireAuth()) return;
@@ -2524,6 +2973,7 @@ function buildPublicDocument(source = state) {
     deletedMembers: (source.deletedMembers || []).map(x => ({ ...x })),
     globalTypes: (source.types || []).filter(isGlobalType).map(typeWithoutPrice),
     coreSummaries: (source.coreSummaries || []).map(g => ({ ...g, typeIds: [...(g.typeIds || [])] })),
+    performanceManager: normalizeManager(source.performanceManager),
     updatedAt: new Date().toISOString()
   };
 }
@@ -2533,7 +2983,8 @@ function buildPricingDocument(source = state) {
     prices[t.id] = {
       price: typePrice(t),
       pricingUpdatedAt: t.pricingUpdatedAt || '',
-      pricingUpdatedBy: t.pricingUpdatedBy || ''
+      pricingUpdatedBy: t.pricingUpdatedBy || '',
+      reviewRequired: !!t.reviewRequired
     };
   });
   return { version: 10, prices, updatedAt: new Date().toISOString(), updatedBy: currentUser()?.id || '' };
@@ -2591,7 +3042,8 @@ function mergeAdminPublicDocument(remoteDoc, localDoc) {
   const members = mergeLatestById(remoteDoc.members || [], localDoc.members || []).filter(m => survivesTombstone(m, deletedMemberMap));
   const globalTypes = mergeLatestById(remoteDoc.globalTypes || remoteDoc.types || [], localDoc.globalTypes || []);
   const coreSummaries = mergeLatestById(remoteDoc.coreSummaries || [], localDoc.coreSummaries || []);
-  return { ...remoteDoc, ...localDoc, users, members, deletedUsers, deletedMembers, globalTypes, coreSummaries, updatedAt: new Date().toISOString() };
+  const performanceManager = String(localDoc.performanceManager?.updatedAt || '') > String(remoteDoc.performanceManager?.updatedAt || '') ? normalizeManager(localDoc.performanceManager) : normalizeManager(remoteDoc.performanceManager);
+  return { ...remoteDoc, ...localDoc, users, members, deletedUsers, deletedMembers, globalTypes, coreSummaries, performanceManager, updatedAt: new Date().toISOString() };
 }
 function mergeUserPublicDocument(remoteDoc, localState, user) {
   if (!remoteDoc) return null;
@@ -2630,6 +3082,7 @@ function composeStateFromDocuments(publicDoc, pricingDoc, userDocs = []) {
     records,
     deletedRecords,
     coreSummaries: pub.coreSummaries || [],
+    performanceManager: pub.performanceManager,
     updatedAt: pub.updatedAt || new Date().toISOString()
   });
 }
@@ -2768,7 +3221,7 @@ function normalizeData(d = {}) {
   const deletedMembers = Array.isArray(d.deletedMembers) ? d.deletedMembers.map(x => ({ id: x.id || '', userId: x.userId || '', deletedAt: x.deletedAt || x.updatedAt || now, updatedAt: x.updatedAt || x.deletedAt || now, deletedBy: x.deletedBy || '' })).filter(x => x.id) : [];
   const deletedUserMap = tombstoneMap(deletedUsers);
   const deletedMemberMap = tombstoneMap(deletedMembers);
-  let members = Array.isArray(d.members) && d.members.length ? d.members.map((m, idx) => ({
+  let members = Array.isArray(d.members) ? d.members.map((m, idx) => ({
     id: m.id || uid(),
     name: m.name || `成员${idx + 1}`,
     role: m.role || '',
@@ -2797,7 +3250,8 @@ function normalizeData(d = {}) {
       deletedAt: t.deletedAt || '',
       mergedIntoTypeId: t.mergedIntoTypeId || '',
       pricingUpdatedAt: t.pricingUpdatedAt || '',
-      pricingUpdatedBy: t.pricingUpdatedBy || ''
+      pricingUpdatedBy: t.pricingUpdatedBy || '',
+      reviewRequired: !!t.reviewRequired
     };
   }) : base.types.map(t => ({ ...t, ownerMemberId: 'global', scope: 'global', createdAt: now, updatedAt: now, deletedAt: '' }));
   let users = Array.isArray(d.users) && d.users.length ? d.users.map((u, idx) => ({
@@ -2833,7 +3287,9 @@ function normalizeData(d = {}) {
     remark: r.remark || '',
     createdAt: r.createdAt || now,
     updatedAt: r.updatedAt || r.createdAt || now,
-    createdBy: r.createdBy || ''
+    createdBy: r.createdBy || '',
+    reviewStatus: ['pending','approved','rejected'].includes(r.reviewStatus) ? r.reviewStatus : 'approved',
+    reviewedAt: r.reviewedAt || '', reviewedBy: r.reviewedBy || ''
   })).filter(r => r.typeId && typeIds.has(r.typeId)) : [];
   let deletedRecords = Array.isArray(d.deletedRecords) ? d.deletedRecords.map(x => ({
     id: x.id || '',
@@ -2875,7 +3331,7 @@ function normalizeData(d = {}) {
   records = reconciled.records;
   const finalTypeIds = new Set(types.map(t => t.id));
   groups = reconciled.groups.map(g => ({ ...g, typeIds: (g.typeIds || []).filter(id => finalTypeIds.has(id)) }));
-  return { version: 10, registrationCode: d.registrationCode || base.registrationCode || '123456', settings, users, members, types, records, deletedRecords, deletedUsers, deletedMembers, coreSummaries: groups, updatedAt: d.updatedAt || now };
+  return { version: 10, performanceManager: normalizeManager(d.performanceManager), registrationCode: d.registrationCode || base.registrationCode || '123456', settings, users, members, types, records, deletedRecords, deletedUsers, deletedMembers, coreSummaries: groups, updatedAt: d.updatedAt || now };
 }
 function downloadBlob(filename, blob) {
   const bridge = window.AndroidBridge || window.Android;
@@ -2939,13 +3395,14 @@ function orderedTxtSummary(records) {
     });
 }
 function memberMonthlyTxt(member, month, records) {
-  const summary = orderedTxtSummary(records);
+  const summary = window.__oneTimeManager ? orderedManagerTxtSummary(records) : orderedTxtSummary(records);
   const name = member?.name || member?.displayName || member?.username || '未命名';
-  const lines = [`姓名：${name}`, '业绩：'];
+  const lines = [`姓名：${name}`];
   if (summary.length) {
-    summary.forEach(x => lines.push(`${x.type.name}${formatTxtNumber(x.value)}${txtUnitSuffix(x.type.unit)}`));
+    lines.push('业绩类型，数量或者金额，单位');
+    summary.forEach(x => lines.push(`${x.type.name}，${formatTxtNumber(x.value)}，${x.type.unit || '项'}`));
   } else {
-    lines.push('暂无业绩');
+    lines.push('业绩类型，数量或者金额，单位');
   }
   return lines.join('\n');
 }
@@ -3067,11 +3524,13 @@ async function exportTxt() {
     if (!files.length) { showToast(`${month} 暂无可导出的业绩`); return; }
     const zipBlob = zipStoredBlob(files);
     downloadBlob(`${month}全员业绩TXT.zip`, zipBlob);
+    window.__oneTimeManager=false;
     showToast(`导出完成：导出人数 ${files.length}，TXT 文件数 ${files.length}，ZIP 文件大小 ${formatBytes(zipBlob.size)}`);
   } else {
     const m = memberById(user.memberId) || { name: user.displayName || user.username };
     const records = monthRecords(month, user.memberId);
     downloadFile(`${safeFilename(m.name)}_${month}.txt`, '\ufeff' + memberMonthlyTxt(m, month, records), 'text/plain;charset=utf-8');
+    window.__oneTimeManager=false;
     showToast(`导出完成：${safeFilename(m.name)}_${month}.txt`);
   }
 }
@@ -3104,7 +3563,7 @@ function xlsxFormulaCell(ref, formula, cachedValue, style = 0) {
   const n = Number(cachedValue || 0);
   return `<c r="${ref}" s="${style}"><f>${xlsxXmlEscape(formula)}</f><v>${Number.isFinite(n) ? n : 0}</v></c>`;
 }
-function buildMonthlySummaryXlsx(month, members, types, totals) {
+function buildMonthlySummaryXlsx(month, members, types, totals, quickMode = false) {
   const lastColumnIndex = types.length + 2;
   const lastTypeColumnIndex = types.length + 1;
   const lastColumn = xlsxColumnName(lastColumnIndex);
@@ -3112,14 +3571,14 @@ function buildMonthlySummaryXlsx(month, members, types, totals) {
   const now = new Date().toISOString();
   const titleRowCells = [xlsxInlineCell('A1', '人员姓名/业绩类型', 1)];
   types.forEach((t, index) => titleRowCells.push(xlsxInlineCell(`${xlsxColumnName(index + 2)}1`, t.name || '', 1)));
-  titleRowCells.push(xlsxInlineCell(`${lastColumn}1`, '总业绩金额（元）', 5));
+  titleRowCells.push(xlsxInlineCell(`${lastColumn}1`, quickMode ? '有业绩类型数' : '总业绩金额（元）', 5));
 
-  const priceRowCells = [xlsxInlineCell('A2', '业绩定价（元）', 2)];
+  const priceRowCells = [xlsxInlineCell('A2', quickMode ? '业绩单位' : '业绩定价（元）', 2)];
   types.forEach((t, index) => {
     const price = typePrice(t);
-    priceRowCells.push(xlsxNumberCell(`${xlsxColumnName(index + 2)}2`, price === null ? 0 : price, price === null ? 7 : 8));
+    priceRowCells.push(quickMode ? xlsxInlineCell(`${xlsxColumnName(index + 2)}2`, t.unit || '项', 2) : xlsxNumberCell(`${xlsxColumnName(index + 2)}2`, price === null ? 0 : price, price === null ? 7 : 8));
   });
-  priceRowCells.push(xlsxInlineCell(`${lastColumn}2`, '未定价按0元', 2));
+  priceRowCells.push(xlsxInlineCell(`${lastColumn}2`, quickMode ? '不同单位不相加' : '未定价按0元', 2));
 
   const dataRows = members.map((m, memberIndex) => {
     const rowNumber = memberIndex + 3;
@@ -3128,13 +3587,13 @@ function buildMonthlySummaryXlsx(month, members, types, totals) {
     types.forEach((t, typeIndex) => {
       const value = Number(totals.get(`${m.id}@@${t.id}`) || 0);
       const price = typePrice(t) ?? 0;
-      cachedTotal += value * price;
+      cachedTotal += quickMode ? (value !== 0 ? 1 : 0) : value * price;
       cells.push(xlsxNumberCell(`${xlsxColumnName(typeIndex + 2)}${rowNumber}`, value, 4));
     });
     const formula = types.length
-      ? `SUMPRODUCT(B${rowNumber}:${xlsxColumnName(lastTypeColumnIndex)}${rowNumber},$B$2:$${xlsxColumnName(lastTypeColumnIndex)}$2)`
+      ? (quickMode ? `COUNTIF(B${rowNumber}:${xlsxColumnName(lastTypeColumnIndex)}${rowNumber},">0")` : `SUMPRODUCT(B${rowNumber}:${xlsxColumnName(lastTypeColumnIndex)}${rowNumber},$B$2:$${xlsxColumnName(lastTypeColumnIndex)}$2)`)
       : '0';
-    cells.push(xlsxFormulaCell(`${lastColumn}${rowNumber}`, formula, cachedTotal, 6));
+    cells.push(xlsxFormulaCell(`${lastColumn}${rowNumber}`, formula, cachedTotal, quickMode ? 4 : 6));
     return `<row r="${rowNumber}" ht="26" customHeight="1">${cells.join('')}</row>`;
   }).join('');
 
@@ -3208,7 +3667,7 @@ async function exportMonthlyAllSummaryExcel() {
     const bGlobal = isGlobalType(b) ? 0 : 1;
     return aGlobal - bGlobal || Number(a.sortOrder || 0) - Number(b.sortOrder || 0) || String(a.name || '').localeCompare(String(b.name || ''), 'zh-CN');
   });
-  const records = (state.records || []).filter(r => r.date && r.date.startsWith(month));
+  const records = validRecords(state.records).filter(r => r.date && r.date.startsWith(month));
   const totals = new Map();
   records.forEach(r => {
     const key = `${r.memberId}@@${r.typeId}`;
@@ -3283,6 +3742,10 @@ document.querySelectorAll('.tabbar button').forEach(b => b.onclick = () => {
   page = b.dataset.page; render();
 });
 document.getElementById('syncBtn').onclick = () => pushToYunduan(true);
+document.getElementById('managerHeaderBtn').onclick=openManager;
+document.getElementById('quickHeaderBtn').onclick=openQuickTools;
+document.getElementById('quickHeaderBackBtn').onclick=()=>{captureQuickDraft();closeQuickTools();};
+document.getElementById('managerBackBtn').onclick=()=>{page='settings';render();};
 window.addEventListener('online', async () => {
   saveSyncMeta({ status: syncMeta.pending ? 'pending' : 'idle' });
   await flushPendingSessionReleases();

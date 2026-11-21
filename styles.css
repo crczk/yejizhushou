@@ -732,3 +732,33 @@ body.temporal-picker-open { overflow: hidden; }
   .share-row-head { align-items: flex-start; }
   .share-values { display: grid; gap: 1px; text-align: right; }
 }
+
+/* v31 manager page, responsive editable controls */
+.manager-type-row {border:1px solid #d0d5dd;border-radius:14px;padding:14px;margin:10px 0;background:#f8fafc;display:grid;gap:10px;grid-template-columns:minmax(100px,1fr) minmax(85px,0.5fr) minmax(150px,2fr);align-items:end}
+.manager-type-row .row{grid-column:1/-1}
+.manager-check {display:flex;align-items:center;gap:10px;padding:12px 0;font-weight:600;cursor:pointer}
+.manager-check input {width:18px;height:18px;flex:0 0 auto}
+.topbar-actions {align-items:center;justify-content:flex-end;gap:5px}
+@media(max-width:650px){.manager-type-row{grid-template-columns:1fr 1fr}.manager-type-row .field:nth-child(3){grid-column:1/-1}.topbar-actions{gap:3px}.topbar-actions button{padding:7px;font-size:11px}}
+
+/* v31.1 compact, horizontally-scrollable module navigation */
+.module-hub-compact{position:relative;padding:5px 4px 7px!important;margin:0 0 8px!important;background:transparent!important;border:0!important;box-shadow:none!important;}
+.module-tabs{display:flex;flex-wrap:nowrap;gap:6px;overflow-x:auto;overscroll-behavior-inline:contain;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch;scrollbar-width:thin;padding:3px 2px 6px;max-width:100%;}
+.module-tab{flex:0 0 auto;white-space:nowrap;min-height:32px;padding:6px 10px!important;border-radius:9px;border:1px solid var(--border,#d7dce6);background:var(--surface,#fff);font-size:12px;font-weight:650;scroll-snap-align:start;}
+.module-tab.active{background:#155eef;color:#fff;border-color:#155eef;}
+.module-active-label{padding:2px 4px 0;font-size:11px;line-height:1.25;color:var(--muted,#667085);}
+.module-active-label strong{font-weight:700;color:var(--text,#1d2939);}
+@media(max-width:550px){.module-hub-compact{padding:3px 0 5px!important}.module-tabs{gap:5px}.module-tab{min-height:31px;padding:5px 9px!important}}
+
+/* v31.4 quick tool: top-right entry and an independent, mobile-friendly workspace */
+.topbar-actions {gap:5px;justify-content:flex-end;}
+.topbar-actions button {white-space:nowrap;padding:7px 9px;font-size:12px;}
+.quick-tool-list {display:grid;gap:12px;margin:15px 0;}
+.quick-tool-big {display:flex;flex-direction:column;align-items:flex-start;gap:7px;min-height:92px;text-align:left;font-size:17px;padding:18px;}
+.quick-tool-big span {font-size:12px;opacity:.9;font-weight:500;}
+.quick-rule-row {padding:12px;border:1px solid var(--line);border-radius:14px;margin-bottom:12px;background:#f8fafc;}
+.quick-preview-scroll{overflow-x:auto;margin-top:14px;max-width:100%;}
+.quick-preview-table {border-collapse:collapse;min-width:100%;font-size:12px;white-space:nowrap;}
+.quick-preview-table td,.quick-preview-table th{border:1px solid #d0d5dd;padding:8px;}
+.quick-preview-table th{background:#edf4ff;}
+@media(max-width:480px){.topbar-actions{max-width:57%;}.topbar-actions button{font-size:11px;padding:6px 7px;}}
