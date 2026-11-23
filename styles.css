@@ -762,3 +762,12 @@ body.temporal-picker-open { overflow: hidden; }
 .quick-preview-table td,.quick-preview-table th{border:1px solid #d0d5dd;padding:8px;}
 .quick-preview-table th{background:#edf4ff;}
 @media(max-width:480px){.topbar-actions{max-width:57%;}.topbar-actions button{font-size:11px;padding:6px 7px;}}
+
+/* v31.14 业绩类型池 / 日报文本汇总 */
+.pool-status { margin-top: 10px; }
+.pool-section-title { margin-top: 16px; }
+.pool-section-title h3 { margin: 0; font-size: 15px; }
+.pool-hint { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pool-locked { opacity: .78; }
+.day-text-summary { width: 100%; min-height: 170px; margin-top: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "PingFang SC", "Microsoft YaHei", monospace; font-size: 15px; line-height: 1.7; white-space: pre; overflow: auto; resize: vertical; }
+.pill.mini { padding: 2px 7px; font-size: 11px; margin-left: 4px; }

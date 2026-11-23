@@ -6,7 +6,7 @@ const DEVICE_KEY = 'bank-performance-yunduan-device-v1';
 const PENDING_SESSION_RELEASE_KEY = 'bank-performance-yunduan-pending-session-release-v1';
 const REMOTE_SESSION_TTL_MS = 30 * 60 * 1000;
 const REMOTE_SESSION_TOUCH_INTERVAL_MS = 8 * 60 * 1000;
-const APP_VERSION = '31.12';
+const APP_VERSION = '31.14';
 const RECORD_DRAFT_KEY = 'bank-performance-record-draft-v31';
 try {
   if (window.AndroidBridge || window.Android) document.documentElement.classList.add('native-android');
@@ -52,6 +52,7 @@ const defaultData = () => {
     deletedMembers: [],
     coreSummaries: [],
     performanceManager: { staff: [], types: [], updatedAt: '' },
+    typePools: {},
     updatedAt: now
   };
 };
@@ -87,7 +88,7 @@ function restoreRecordDraft() {
   if (member && d.memberId && [...(member.options || [])].some(o => o.value === d.memberId)) member.value = d.memberId;
   const type = f.elements.namedItem('typeId');
   if (type) {
-    type.innerHTML = typeSelectOptions('', member?.value || currentUser()?.memberId || '', true);
+    type.innerHTML = typeSelectOptions('', member?.value || currentUser()?.memberId || '', true, true);
     if ([...type.options].some(o => o.value === d.typeId)) type.value = d.typeId;
   }
   ['value','date','remark'].forEach(k => { const el=f.elements.namedItem(k); if (el && d[k] !== undefined) el.value=d[k]; });
@@ -794,6 +795,44 @@ function typeOwnerName(t) {
 function typesForOwnerCount(types, memberId) {
   return (types || []).filter(t => (memberId === 'global' ? isGlobalType(t) : (t.ownerMemberId || t.memberId || '') === memberId)).length;
 }
+// ===== v31.14 业绩类型池：每位用户从全部业绩类型中挑选自己的常用类型 =====
+function typePoolEntry(memberId, source = state) {
+  const e = ((source && source.typePools) || {})[memberId];
+  return e && Array.isArray(e.ids) ? e : null;
+}
+function resolveMergedType(id) {
+  let t = typeById(id), guard = 0;
+  while (t && t.mergedIntoTypeId && guard++ < 6) t = typeById(t.mergedIntoTypeId) || t;
+  return t;
+}
+function typePoolTypes(memberId) {
+  const entry = typePoolEntry(memberId);
+  if (!entry) return [];
+  const seen = new Set(), out = [];
+  entry.ids.forEach(id => {
+    const t = resolveMergedType(id);
+    if (t && t.active !== false && canMemberUseType(t, memberId) && !seen.has(t.id)) { seen.add(t.id); out.push(t); }
+  });
+  return out;
+}
+function applyTypePool(list, memberId) {
+  const ids = new Set(typePoolTypes(memberId).map(t => t.id));
+  return ids.size ? list.filter(t => ids.has(t.id)) : list;
+}
+function setTypePool(memberId, ids) {
+  if (!memberId) return;
+  state.typePools = { ...(state.typePools || {}), [memberId]: { ids: Array.from(new Set((ids || []).filter(Boolean))), updatedAt: new Date().toISOString() } };
+}
+function addToTypePoolIfConfigured(memberId, typeId) {
+  const current = typePoolTypes(memberId).map(t => t.id);
+  if (!current.length || current.includes(typeId)) return;
+  setTypePool(memberId, [...current, typeId]);
+}
+function typePoolHintText(memberId) {
+  const n = typePoolTypes(memberId).length;
+  const own = memberId === currentUser()?.memberId;
+  return n ? `已按${own ? '“我的业绩类型池”' : '该成员的业绩类型池'}筛选，共 ${n} 项` : `${own ? '尚未设置“我的业绩类型池”' : '该成员尚未设置业绩类型池'}，当前显示全部可用类型`;
+}
 function safeHtml(s) { return String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function normalizeUsername(v) { return String(v || '').trim().toLowerCase(); }
 function nowLocalText() { return new Date().toLocaleString('zh-CN', { hour12: false }); }
@@ -1181,9 +1220,10 @@ function memberFilterTpl(id = 'memberFilter', includeAll = true, value = current
     ${state.members.map(m => `<option value="${m.id}" ${value === m.id ? 'selected' : ''}>${safeHtml(m.name)}</option>`).join('')}
   </select>`;
 }
-function typeSelectOptions(selected = '', memberId = '', includePlaceholder = false) {
+function typeSelectOptions(selected = '', memberId = '', includePlaceholder = false, usePool = false) {
   const user = currentUser();
-  const list = isAdmin(user) && !memberId ? visibleTypes(user) : typesForMember(memberId || user?.memberId || '');
+  let list = isAdmin(user) && !memberId ? visibleTypes(user) : typesForMember(memberId || user?.memberId || '');
+  if (usePool) list = applyTypePool(list, memberId || user?.memberId || '');
   if (!list.length) return '<option value="" disabled selected>请先新增该成员的业绩类型</option>';
   const placeholder = includePlaceholder ? `<option value="" disabled ${selected ? '' : 'selected'}>请选择业绩类型</option>` : '';
   return placeholder + list.map(t => `<option value="${t.id}" ${selected === t.id ? 'selected' : ''}>${safeHtml(t.name)}（${safeHtml(t.unit)}）</option>`).join('');
@@ -1307,7 +1347,7 @@ function addTpl() {
     <div class="section-title"><h2>新增业绩记录</h2><span class="muted">登录后按账号自动归属</span></div>
     <form id="recordForm">
       ${memberField}
-      <div class="field"><label>业绩类型</label><select id="recordTypeSelect" name="typeId" required>${typeSelectOptions('', isAdmin(user) ? (state.members[0]?.id || '') : user.memberId, true)}</select><div id="recordPriceHint" class="field-hint">请选择业绩类型查看单价</div></div>
+      <div class="field"><label>业绩类型</label><select id="recordTypeSelect" name="typeId" required>${typeSelectOptions('', isAdmin(user) ? (state.members[0]?.id || '') : user.memberId, true, true)}</select><div id="recordPriceHint" class="field-hint">请选择业绩类型查看单价</div><div class="field-hint pool-hint"><span id="recordPoolHintText">${safeHtml(typePoolHintText(isAdmin(user) ? (state.members[0]?.id || '') : user.memberId))}</span> <button type="button" class="ghost small" data-page-jump="settings" data-module-open="typepool">调整类型池</button></div></div>
       <div class="field"><label>上报数量 / 数值</label><input name="value" type="number" inputmode="decimal" step="0.01" min="0" placeholder="例如 50、3、1" required /></div>
       <div class="field"><label>日期</label><input id="recordDatePicker" name="date" type="date" value="${safeHtml(draft.date || todayStr())}" required /></div>
       <div class="field"><label>备注</label><textarea name="remark" placeholder="例如：信用卡上报情况。不要填写身份证、银行卡号等敏感信息。"></textarea></div>
@@ -1324,6 +1364,7 @@ function dayTpl() {
   const modules = [
     { id: 'overview', icon: '概览', title: '日报概览', desc: '选择日期和成员并查看关键数字' },
     { id: 'types', icon: '分类', title: '各项业绩汇总', desc: '查看各类型当天数量与总价' },
+    { id: 'textsummary', icon: '文本', title: '日报文本汇总', desc: '生成可直接复制的当日业绩文本' },
     ...(isAdmin() ? [{ id: 'members', icon: '成员', title: '成员价格明细', desc: '查看每位成员当天业绩明细' }] : []),
     { id: 'details', icon: '明细', title: '当天记录明细', desc: '查看或删除有权限的原始记录' }
   ];
@@ -1335,9 +1376,18 @@ function dayTpl() {
       <div class="metric light"><div class="label">上报记录 / 项目</div><div class="value" style="font-size:19px">${recs.length} 笔 / ${typeSummary(recs).length} 项</div></div>
     </div><div style="margin-top:10px">${pricingHint(recs)}</div>`, date);
   const types = moduleCardTpl('day', 'types', `各项业绩${showAmount ? '总价' : '汇总'}`, `<p class="muted">${showAmount ? '数量 × 管理员单价' : amountVisibilityLabel()}</p>${summaryList(typeSummary(recs))}`, date);
+  const withHeader = window.__dayTextHeader !== false;
+  const summaryText = dayTextSummaryText(recs, withHeader);
+  const textSummary = moduleCardTpl('day', 'textsummary', '日报文本汇总', `
+    <div class="row wrap module-toolbar"><input id="dayPicker" type="date" value="${date}" style="max-width:150px">${memberFilterTpl('dayMemberFilter')}</div>
+    <p class="muted">按“业绩名称，数量或者金额，单位”汇总当天业绩，直接在下方文本框中复制即可，不会生成任何文件。</p>
+    <label class="manager-check"><input id="dayTextHeader" type="checkbox" ${withHeader ? 'checked' : ''}> 包含首行“业绩名称，数量或者金额，单位”</label>
+    <textarea id="dayTextSummary" class="day-text-summary" rows="8" readonly placeholder="当天暂无业绩记录">${safeHtml(summaryText)}</textarea>
+    <div class="row wrap" style="margin-top:10px"><button type="button" id="dayTextCopyBtn" class="primary">复制全部文本</button><button type="button" id="dayTextSelectBtn" class="ghost">全选文本</button></div>
+    <div class="field-hint">${summaryText ? `共 ${summaryText.split('\n').length - (withHeader ? 1 : 0)} 项业绩（${recs.length} 笔记录汇总）；同名同单位的业绩已合并。` : '当天暂无可汇总的业绩。'}</div>`, date);
   const members = isAdmin() ? moduleCardTpl('day', 'members', '每位成员当日业绩价格明细', memberPricingBreakdown(recs, '当日'), '管理员视图') : '';
   const details = moduleCardTpl('day', 'details', '明细记录', recs.length ? `<div class="list">${recs.map(recordItem).join('')}</div>` : '<div class="empty">当天还没有记录</div>', date);
-  return `${hub}${overview}${types}${members}${details}`;
+  return `${hub}${overview}${types}${textSummary}${members}${details}`;
 }
 function monthTpl() {
   const month = window.__selectedMonth || monthStr();
@@ -1382,6 +1432,7 @@ function settingsTpl() {
     ...(admin ? [{ id: 'registration', icon: '注册', title: '注册校验码', desc: '修改新用户注册校验码' }] : []),
     ...(admin ? [{ id: 'users', icon: '用户', title: '用户账号管理', desc: '重置密码、角色和账号状态' }] : []),
     ...(admin ? [{ id: 'members', icon: '成员', title: '成员管理', desc: '新增或维护成员资料' }] : []),
+    { id: 'typepool', icon: '类型池', title: '业绩类型池', desc: '从全部业绩类型中挑选我的常用类型，记录页只显示这些' },
     { id: 'types', icon: '类别', title: admin ? '业绩类型与定价' : '我的业绩类型', desc: admin ? '定价并将个人类别转为公共类别' : '新增和查看个人可用类别' },
     ...(admin ? [{ id: 'core', icon: '核心', title: '核心汇总管理', desc: '维护首页核心汇总大类' }] : []),
     { id: 'manager', icon: '管家', title: '业绩管家', desc: '管理员直接进入，其他用户须验证管家口令' },
@@ -1409,6 +1460,7 @@ function settingsTpl() {
   const types = moduleCardTpl('settings', 'types', admin ? '业绩类型与定价管理' : '我的业绩类型', `
     <div class="row wrap module-toolbar"><p class="muted">${admin ? '可为公共类型和个人类型定价；个人类型可转为公共类型。管理员删除类型时仅停止后续录入，历史记录、历史月份统计和原定价数据均保留。' : '新增名称时会先匹配公共类型；同名公共类型存在时直接使用。'}</p><button id="addTypeBtn" class="ghost small">${admin ? '新增公共类型' : '新增个人类型'}</button></div>
     <div class="list">${visibleTypes(user).map(typeItem).join('') || `<div class="empty">${admin ? '暂无业绩类型' : '暂无业绩类型，可点击新增类型'}</div>`}</div>`);
+  const typepool = moduleCardTpl('settings', 'typepool', '业绩类型池', typePoolTpl(), '仅影响我的记录页');
   const core = admin ? moduleCardTpl('settings', 'core', '业绩核心汇总管理', `<p class="muted">添加首页展示的大类并勾选包含的业绩类型。所有成员可按日期查看。</p>${coreSummaryManagementTpl()}`, '仅管理员维护') : '';
   const managerHub = moduleCardTpl('settings', 'manager', '业绩管家', '<p class="muted">配置人员、类型、关键词包含规则和单价，并生成新的 XLSX 汇总。</p><button id="openManagerBtn" class="primary full">进入业绩管家独立页面</button>');
   const reviews = admin ? moduleCardTpl('settings', 'reviews', '待审核业绩', reviewQueueTpl()) : '';
@@ -1433,7 +1485,70 @@ function settingsTpl() {
       <div class="about-app-row"><span>当前版本</span><strong>${APP_VERSION}</strong></div>
       <p>该软件仅限内部人员提供便利使用，不作任何商业用途使用，欢迎交流学习。</p>
     </div>`, '内部使用');
-  return `${hub}${account}${sync}${amount}${cloud}${registration}${users}${members}${types}${core}${managerHub}${reviews}${reminder}${tools}${about}`;
+  return `${hub}${account}${sync}${amount}${cloud}${registration}${users}${members}${typepool}${types}${core}${managerHub}${reviews}${reminder}${tools}${about}`;
+}
+function typePoolItemTpl(t, selected) {
+  const mine = typeOwnerId(t) === currentUser()?.memberId;
+  const tag = isGlobalType(t) ? '公共类型' : (mine ? '我的个人类型' : '个人类型');
+  return `<div class="item pool-item" data-pool-name="${safeHtml(String(t.name || '').toLowerCase())}">
+    <div style="flex:1"><div class="item-title"><span class="dot" style="background:${safeHtml(t.color)}"></span>${safeHtml(t.name)} <span class="pill mini">${tag}</span></div><div class="item-sub">单位：${safeHtml(t.unit)}</div></div>
+    <div class="row wrap"><button type="button" class="${selected ? 'soft' : 'primary'} small" data-pool-toggle="${safeHtml(t.id)}">${selected ? '移出' : '加入'}</button></div>
+  </div>`;
+}
+function typePoolTpl() {
+  const user = currentUser();
+  const memberId = user.memberId;
+  const poolTypes = typePoolTypes(memberId);
+  const poolSet = new Set(poolTypes.map(t => t.id));
+  const all = (state.types || []).filter(t => t.active !== false);
+  const usable = all.filter(t => canMemberUseType(t, memberId)).sort((a, b) => (isGlobalType(a) === isGlobalType(b) ? 0 : isGlobalType(a) ? -1 : 1) || Number(a.sortOrder || 0) - Number(b.sortOrder || 0));
+  const usableNames = new Set(usable.map(t => canonicalTypeName(t.name)));
+  const othersMap = new Map();
+  all.filter(t => !canMemberUseType(t, memberId)).forEach(t => {
+    const key = canonicalTypeName(t.name);
+    if (!key || usableNames.has(key)) return;
+    if (!othersMap.has(key)) othersMap.set(key, { type: t, owners: [] });
+    const ownerName = memberById(typeOwnerId(t))?.name || '未关联成员';
+    const g = othersMap.get(key);
+    if (!g.owners.includes(ownerName)) g.owners.push(ownerName);
+  });
+  const others = Array.from(othersMap.values());
+  const selectedList = poolTypes.map(t => typePoolItemTpl(t, true)).join('');
+  const availableList = usable.filter(t => !poolSet.has(t.id)).map(t => typePoolItemTpl(t, false)).join('');
+  const othersList = others.map(({ type: t, owners }) => `<div class="item pool-item pool-locked" data-pool-name="${safeHtml(String(t.name || '').toLowerCase())}">
+    <div style="flex:1"><div class="item-title"><span class="dot" style="background:${safeHtml(t.color)}"></span>${safeHtml(t.name)} <span class="pill mini">个人类型</span></div><div class="item-sub">单位：${safeHtml(t.unit)} · 归属：${safeHtml(owners.join('、'))} · 转为公共类型后才能加入类型池</div></div>
+    <div class="row wrap">${isAdmin(user) ? `<button type="button" class="primary small" data-promote-type="${safeHtml(t.id)}">转为公共</button>` : '<span class="pill mini">暂不可选</span>'}</div>
+  </div>`).join('');
+  const status = poolTypes.length
+    ? `我的业绩类型池共 <strong>${poolTypes.length}</strong> 项，记录业绩时只会显示这些类型。`
+    : '你还没有设置业绩类型池：目前记录页显示全部可用类型（公共类型 + 我的个人类型）。从下方“加入”需要的类型后，记录页就只显示它们。';
+  return `<p class="muted">汇集全部业绩类型。公共类型可直接加入；其他成员的个人类型需管理员转为公共类型后，才能被他人使用。类型池仅影响“记录”页的类型选择，不影响日报、月报、导出和历史数据；同步到云端后换设备也生效。</p>
+    <div class="readonly-box pool-status">${status}</div>
+    <div class="field" style="margin-top:10px"><input id="typePoolSearch" type="search" placeholder="搜索业绩类型名称" value="${safeHtml(window.__poolSearch || '')}" autocomplete="off"></div>
+    <div class="section-title pool-section-title"><h3>我的业绩类型池（${poolTypes.length}）</h3>${typePoolEntry(memberId) ? '<button type="button" id="poolClearBtn" class="ghost small">清空类型池</button>' : ''}</div>
+    <div class="list" id="poolSelectedList">${selectedList || '<div class="empty">暂未选择，请从下方加入</div>'}</div>
+    <div class="section-title pool-section-title"><h3>可加入的业绩类型（${usable.length - poolTypes.length}）</h3></div>
+    <div class="list" id="poolAvailableList">${availableList || '<div class="empty">没有更多可加入的类型</div>'}</div>
+    ${others.length ? `<div class="section-title pool-section-title"><h3>其他成员的个人类型（${others.length}）</h3></div><div class="list" id="poolOthersList">${othersList}</div>` : ''}`;
+}
+function dayTextSummaryText(records, withHeader = true) {
+  const groups = new Map();
+  orderedTxtSummary(validRecords(records)).forEach(x => {
+    const name = String(x.type.name || '').trim() || '未命名';
+    const unit = String(x.type.unit || '').trim() || '项';
+    const key = `${name}\u0001${unit}`;
+    if (!groups.has(key)) groups.set(key, { name, unit, value: 0 });
+    groups.get(key).value += Number(x.value || 0);
+  });
+  const lines = Array.from(groups.values()).filter(g => g.value !== 0).map(g => `${g.name}，${formatTxtNumber(g.value)}，${g.unit}`);
+  if (!lines.length) return '';
+  return (withHeader ? ['业绩名称，数量或者金额，单位', ...lines] : lines).join('\n');
+}
+async function copyTextBox(el) {
+  const text = el?.value || '';
+  if (!text) return false;
+  try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; } } catch (err) { console.warn(err); }
+  try { el.focus(); el.select(); el.setSelectionRange(0, text.length); return !!document.execCommand('copy'); } catch (err) { console.warn(err); return false; }
 }
 function coreSummaryManagementTpl() {
   const editingId = window.__editingCoreSummaryId || '';
@@ -2163,8 +2278,9 @@ function bindPage() {
   };
   if (recordMemberSelect && recordTypeSelect) recordMemberSelect.onchange = e => {
     snapshotRecordDraft();
-    recordTypeSelect.innerHTML = typeSelectOptions('', e.target.value, true);
+    recordTypeSelect.innerHTML = typeSelectOptions('', e.target.value, true, true);
     refreshEnhancedSelect(recordTypeSelect);
+    const poolHintEl = document.getElementById('recordPoolHintText'); if (poolHintEl) poolHintEl.textContent = typePoolHintText(e.target.value);
     updateRecordPriceHint();
     snapshotRecordDraft();
   };
@@ -2201,7 +2317,8 @@ function bindPage() {
     clearRecordDraft();
     recordForm.reset();
     if (recordForm.memberId) recordForm.memberId.value = isAdmin(user) ? (state.members[0]?.id || '') : user.memberId;
-    if (recordTypeSelect) recordTypeSelect.innerHTML = typeSelectOptions('', isAdmin(user) ? (state.members[0]?.id || '') : user.memberId, true);
+    if (recordTypeSelect) recordTypeSelect.innerHTML = typeSelectOptions('', isAdmin(user) ? (state.members[0]?.id || '') : user.memberId, true, true);
+    { const poolHintEl = document.getElementById('recordPoolHintText'); if (poolHintEl) poolHintEl.textContent = typePoolHintText(isAdmin(user) ? (state.members[0]?.id || '') : user.memberId); }
     refreshEnhancedSelect(recordMemberSelect);
     refreshEnhancedSelect(recordTypeSelect);
     updateRecordPriceHint();
@@ -2345,6 +2462,8 @@ function bindPage() {
     if (!name) return;
     const globalMatch = findGlobalTypeByName(name);
     if (!isAdmin(user) && globalMatch) {
+      addToTypePoolIfConfigured(user.memberId, globalMatch.id);
+      saveLocal(); render();
       showToast(`已匹配管理员类型“${globalMatch.name}”，将直接使用公共类型及其定价`);
       return;
     }
@@ -2364,11 +2483,57 @@ function bindPage() {
     }
     const sameOwnerTypes = typesForOwnerCount(state.types, ownerMemberId);
     const createdAt = new Date().toISOString();
-    state.types.push({ id: uid(), name, unit, price, color: COLORS[state.types.length % COLORS.length], active: true, sortOrder: sameOwnerTypes + 1, ownerMemberId, scope: isAdmin(user) ? 'global' : 'private', createdBy: user.id, createdAt, updatedAt: createdAt, pricingUpdatedAt: price === null ? '' : createdAt, pricingUpdatedBy: price === null ? '' : user.id });
+    const newType = { id: uid(), name, unit, price, color: COLORS[state.types.length % COLORS.length], active: true, sortOrder: sameOwnerTypes + 1, ownerMemberId, scope: isAdmin(user) ? 'global' : 'private', createdBy: user.id, createdAt, updatedAt: createdAt, pricingUpdatedAt: price === null ? '' : createdAt, pricingUpdatedBy: price === null ? '' : user.id };
+    state.types.push(newType);
     if (isAdmin(user)) reconcileStateGlobalTypes();
+    addToTypePoolIfConfigured(user.memberId, newType.id);
     saveLocal(); render();
     showToast(isAdmin(user) ? '公共业绩类型已新增' : '个人业绩类型已新增，等待管理员定价');
   };
+  const keepScrollRender = () => { const y = window.scrollY; render(); window.scrollTo(0, y); };
+  document.querySelectorAll('[data-pool-toggle]').forEach(b => b.onclick = () => {
+    const user = currentUser(); if (!user) return;
+    const t = typeById(b.dataset.poolToggle);
+    if (!t || t.active === false || !canMemberUseType(t, user.memberId)) { showToast('该类型暂不可选，需转为公共类型后才能使用'); return; }
+    const ids = typePoolTypes(user.memberId).map(x => x.id);
+    const has = ids.includes(t.id);
+    setTypePool(user.memberId, has ? ids.filter(id => id !== t.id) : [...ids, t.id]);
+    saveLocal(); keepScrollRender();
+    showToast(has ? `已将“${t.name}”移出我的业绩类型池` : `已将“${t.name}”加入我的业绩类型池`);
+  });
+  const poolClearBtn = document.getElementById('poolClearBtn');
+  if (poolClearBtn) poolClearBtn.onclick = () => {
+    const user = currentUser(); if (!user) return;
+    if (!confirm('确定清空我的业绩类型池吗？\n\n清空后记录页将重新显示全部可用类型，历史业绩数据不受影响。')) return;
+    setTypePool(user.memberId, []);
+    saveLocal(); keepScrollRender(); showToast('已清空我的业绩类型池');
+  };
+  const typePoolSearch = document.getElementById('typePoolSearch');
+  if (typePoolSearch) {
+    const applyPoolSearch = () => {
+      const q = typePoolSearch.value.trim().toLowerCase();
+      window.__poolSearch = typePoolSearch.value;
+      document.querySelectorAll('.pool-item').forEach(el => { el.style.display = !q || (el.dataset.poolName || '').includes(q) ? '' : 'none'; });
+    };
+    typePoolSearch.oninput = applyPoolSearch;
+    applyPoolSearch();
+  }
+  const dayTextHeader = document.getElementById('dayTextHeader');
+  const dayTextSummaryBox = document.getElementById('dayTextSummary');
+  if (dayTextHeader && dayTextSummaryBox) dayTextHeader.onchange = () => {
+    window.__dayTextHeader = dayTextHeader.checked;
+    render();
+  };
+  if (dayTextSummaryBox) {
+    dayTextSummaryBox.onfocus = () => { try { dayTextSummaryBox.select(); } catch {} };
+    const copyBtn = document.getElementById('dayTextCopyBtn');
+    if (copyBtn) copyBtn.onclick = async () => {
+      if (!dayTextSummaryBox.value) { showToast('当天暂无可复制的业绩'); return; }
+      showToast(await copyTextBox(dayTextSummaryBox) ? '已复制到剪贴板' : '自动复制失败，请在文本框中长按或全选后手动复制');
+    };
+    const selBtn = document.getElementById('dayTextSelectBtn');
+    if (selBtn) selBtn.onclick = () => { dayTextSummaryBox.focus(); dayTextSummaryBox.select(); dayTextSummaryBox.setSelectionRange(0, dayTextSummaryBox.value.length); };
+  }
   const addMemberBtn = document.getElementById('addMemberBtn');
   if (addMemberBtn) addMemberBtn.onclick = () => {
     if (!isAdmin()) { showToast('只有管理员可以新增成员'); return; }
@@ -3019,6 +3184,7 @@ function applyLocalPermanentUserDeletion(userId, mode, deletedAt, deletedBy) {
       state.types = (state.types || []).filter(t => !removedTypeSet.has(t.id));
       state.records = (state.records || []).filter(r => r.memberId !== memberId);
       state.deletedRecords = (state.deletedRecords || []).filter(r => r.memberId !== memberId);
+      if (state.typePools) { const { [memberId]: _removedPool, ...restPools } = state.typePools; state.typePools = restPools; }
       state.coreSummaries = (state.coreSummaries || []).map(g => ({ ...g, typeIds: (g.typeIds || []).filter(id => !removedTypeSet.has(id)), updatedAt: deletedAt, updatedBy: deletedBy }));
     }
   }
@@ -3104,6 +3270,7 @@ function buildUserDocument(user, source = state) {
     personalTypes: (source.types || []).filter(t => !isGlobalType(t) && typeOwnerId(t) === memberId).map(typeWithoutPrice),
     records: (source.records || []).filter(r => r.memberId === memberId).map(r => ({ ...r })),
     deletedRecords: (source.deletedRecords || []).filter(x => x.memberId === memberId).map(x => ({ ...x })),
+    ...(typePoolEntry(memberId, source) ? { typePoolIds: [...typePoolEntry(memberId, source).ids], typePoolUpdatedAt: typePoolEntry(memberId, source).updatedAt || '' } : {}),
     updatedAt: new Date().toISOString()
   };
 }
@@ -3117,6 +3284,8 @@ function mergeUserDocuments(remoteDoc, localDoc, globalTypes = []) {
   const publicIds = new Set(publicTypes.map(t => t.id));
   const publicNames = new Set(publicTypes.map(t => canonicalTypeName(t.name)).filter(Boolean));
   const personalTypes = mergeLatestById(remote.personalTypes || [], local.personalTypes || []).filter(t => !publicIds.has(t.id) && !publicNames.has(canonicalTypeName(t.name)));
+  const remoteHasPool = Array.isArray(remote.typePoolIds), localHasPool = Array.isArray(local.typePoolIds);
+  const poolDoc = localHasPool && (!remoteHasPool || String(local.typePoolUpdatedAt || '') >= String(remote.typePoolUpdatedAt || '')) ? local : (remoteHasPool ? remote : null);
   return {
     version: 10,
     userId: local.userId || remote.userId || '',
@@ -3124,6 +3293,7 @@ function mergeUserDocuments(remoteDoc, localDoc, globalTypes = []) {
     personalTypes,
     records,
     deletedRecords,
+    ...(poolDoc ? { typePoolIds: [...poolDoc.typePoolIds], typePoolUpdatedAt: poolDoc.typePoolUpdatedAt || '' } : {}),
     updatedAt: new Date().toISOString()
   };
 }
@@ -3165,6 +3335,8 @@ function composeStateFromDocuments(publicDoc, pricingDoc, userDocs = []) {
   const deletedRecords = userDocs.flatMap(doc => doc?.deletedRecords || []);
   const tombstones = new Map(deletedRecords.map(x => [x.id, itemStamp(x)]));
   const records = userDocs.flatMap(doc => doc?.records || []).filter(r => !tombstones.has(r.id) || tombstones.get(r.id) < itemStamp(r));
+  const typePools = {};
+  userDocs.forEach(doc => { if (doc?.memberId && Array.isArray(doc.typePoolIds)) typePools[doc.memberId] = { ids: [...doc.typePoolIds], updatedAt: doc.typePoolUpdatedAt || '' }; });
   return normalizeData({
     version: 10,
     registrationCode: pub.registrationCode || '123456',
@@ -3178,6 +3350,7 @@ function composeStateFromDocuments(publicDoc, pricingDoc, userDocs = []) {
     deletedRecords,
     coreSummaries: pub.coreSummaries || [],
     performanceManager: pub.performanceManager,
+    typePools,
     updatedAt: pub.updatedAt || new Date().toISOString()
   });
 }
@@ -3442,7 +3615,11 @@ function normalizeData(d = {}) {
   records = reconciled.records;
   const finalTypeIds = new Set(types.map(t => t.id));
   groups = reconciled.groups.map(g => ({ ...g, typeIds: (g.typeIds || []).filter(id => finalTypeIds.has(id)) }));
-  return { version: 10, performanceManager: normalizeManager(d.performanceManager), registrationCode: d.registrationCode || base.registrationCode || '123456', settings, users, members, types, records, deletedRecords, deletedUsers, deletedMembers, coreSummaries: groups, updatedAt: d.updatedAt || now };
+  const typePools = {};
+  if (d.typePools && typeof d.typePools === 'object') Object.entries(d.typePools).forEach(([mid, e]) => {
+    if (mid && e && Array.isArray(e.ids)) typePools[mid] = { ids: Array.from(new Set(e.ids.filter(x => typeof x === 'string' && x))), updatedAt: String(e.updatedAt || '') };
+  });
+  return { version: 10, typePools, performanceManager: normalizeManager(d.performanceManager), registrationCode: d.registrationCode || base.registrationCode || '123456', settings, users, members, types, records, deletedRecords, deletedUsers, deletedMembers, coreSummaries: groups, updatedAt: d.updatedAt || now };
 }
 function downloadBlob(filename, blob) {
   const bridge = window.AndroidBridge || window.Android;

@@ -45,7 +45,12 @@
         }
       ],
       "deletedRecords": [],
-      "updatedAt": "2026-07-23T00:00:00.000Z"
+      "updatedAt": "2026-07-23T00:00:00.000Z",
+      "typePoolIds": [
+        "type_id_1",
+        "type_id_2"
+      ],
+      "typePoolUpdatedAt": "2026-11-21T00:00:00.000Z"
     }
   },
   "deletionModes": {
@@ -57,6 +62,6 @@
     "own": "普通用户只查看本人金额",
     "hidden": "普通用户不显示金额且不拉取 pricing.json"
   },
-  "compatibility": "数据 version 10、旧存储键及原分文件路径不变；v31.1 在 performanceManager 中增加可选的 accessCodeHash；旧记录默认批准；全部客户端升级后启用二次审核",
-  "release": "31.2"
+  "compatibility": "数据 version 10、旧存储键及原分文件路径不变；v31.1 在 performanceManager 中增加可选的 accessCodeHash；旧记录默认批准；全部客户端升级后启用二次审核；v31.14 在 users/用户编号.json 中增加可选字段 typePoolIds / typePoolUpdatedAt（我的业绩类型池），旧版本客户端会忽略该字段，不影响原有数据",
+  "release": "31.14"
 }
