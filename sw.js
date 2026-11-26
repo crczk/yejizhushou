@@ -1,5 +1,5 @@
-const CACHE_NAME = 'performance-yunduan-webapp-v31.14-type-pool-day-text';
-const ASSETS = ['./', './index.html', './styles.css', './cloud-config.js', './app.js', './manifest.webmanifest', './icon.svg', './version-v31.14.txt'];
+const CACHE_NAME = 'performance-yunduan-webapp-v31.16-trend-pool';
+const ASSETS = ['./', './index.html', './styles.css', './cloud-config.js', './app.js', './manifest.webmanifest', './icon.svg', './version-v31.16.txt'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)));
   self.skipWaiting();

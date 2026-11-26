@@ -6,9 +6,11 @@ const DEVICE_KEY = 'bank-performance-yunduan-device-v1';
 const PENDING_SESSION_RELEASE_KEY = 'bank-performance-yunduan-pending-session-release-v1';
 const REMOTE_SESSION_TTL_MS = 30 * 60 * 1000;
 const REMOTE_SESSION_TOUCH_INTERVAL_MS = 8 * 60 * 1000;
-const APP_VERSION = '31.14';
+const APP_VERSION = '31.16';
 const RECORD_DRAFT_KEY = 'bank-performance-record-draft-v31';
+const IN_MINIPROGRAM = (() => { try { return /miniProgram/i.test(navigator.userAgent || '') || window.__wxjs_environment === 'miniprogram'; } catch { return false; } })();
 try {
+  if (IN_MINIPROGRAM) document.documentElement.classList.add('native-miniprogram');
   if (window.AndroidBridge || window.Android) document.documentElement.classList.add('native-android');
   if (new URLSearchParams(location.search).get('desktop') === 'windows') document.documentElement.classList.add('native-windows');
 } catch (err) { console.error(err); }
@@ -158,6 +160,64 @@ function managerMonthData(month, apply, external = null, source = state) {
   return { members, types, totals, ignored };
 }
 
+function showManagerGate(hash) {
+  return new Promise(resolve => {
+    document.querySelector('.gate-overlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.className = 'gate-overlay';
+    overlay.innerHTML = `<div class="gate-card" role="dialog" aria-modal="true" aria-labelledby="gateTitle">
+      <div class="gate-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10.5" width="16" height="10" rx="3"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/><circle cx="12" cy="15.5" r="1.2" fill="currentColor"/></svg></div>
+      <h3 id="gateTitle">业绩管家验证</h3>
+      <p class="gate-sub">请输入管理员设置的管家口令<br>验证通过后即可进入</p>
+      <div class="gate-input-wrap"><input id="gateInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="请输入管家口令"><button type="button" class="gate-eye" id="gateEye" aria-label="显示或隐藏口令">显示</button></div>
+      <div class="gate-error" id="gateError" aria-live="polite"></div>
+      <div class="gate-actions"><button type="button" class="gate-cancel" id="gateCancel">取消</button><button type="button" class="gate-ok" id="gateOk">验证并进入</button></div>
+    </div>`;
+    document.body.appendChild(overlay);
+    const input = overlay.querySelector('#gateInput');
+    const errorEl = overlay.querySelector('#gateError');
+    const okBtn = overlay.querySelector('#gateOk');
+    const card = overlay.querySelector('.gate-card');
+    let done = false;
+    const finish = result => {
+      if (done) return;
+      done = true;
+      document.removeEventListener('keydown', onKey, true);
+      overlay.classList.add('is-closing');
+      setTimeout(() => overlay.remove(), 160);
+      resolve(result);
+    };
+    const submit = async () => {
+      if (done || okBtn.disabled) return;
+      const value = input.value;
+      if (!value) { errorEl.textContent = '请输入管家口令'; input.focus(); return; }
+      okBtn.disabled = true; okBtn.textContent = '验证中…';
+      let ok = false;
+      try { ok = await hashPassword(value) === hash; } catch (err) { console.error(err); }
+      okBtn.disabled = false; okBtn.textContent = '验证并进入';
+      if (ok) { finish(true); return; }
+      errorEl.textContent = '口令不正确，请重新输入';
+      card.classList.remove('gate-shake'); void card.offsetWidth; card.classList.add('gate-shake');
+      input.value = ''; input.focus();
+    };
+    function onKey(e) {
+      if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+      else if (e.key === 'Enter' && document.activeElement === input) { e.preventDefault(); submit(); }
+    }
+    document.addEventListener('keydown', onKey, true);
+    overlay.addEventListener('mousedown', e => { if (e.target === overlay) finish(false); });
+    overlay.querySelector('#gateCancel').onclick = () => finish(false);
+    overlay.querySelector('#gateEye').onclick = e => {
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      e.currentTarget.textContent = show ? '隐藏' : '显示';
+      input.focus();
+    };
+    input.addEventListener('input', () => { errorEl.textContent = ''; });
+    okBtn.onclick = submit;
+    setTimeout(() => input.focus(), 60);
+  });
+}
 async function openManager() {
   if(!requireAuth())return;
   if(cloudReady() && navigator.onLine !== false){
@@ -174,9 +234,8 @@ async function openManager() {
     if(!hash){showToast('管理员尚未设置管家口令，请联系管理员');return;}
     const key=currentUser()?.id || '';
     if(managerUnlockedFor!==key || managerUnlockedHash!==hash){
-      const input=window.prompt('请输入管理员设置的管家口令');
-      if(input===null)return;
-      if(await hashPassword(input)!==hash){showToast('管家口令错误');return;}
+      const passed = await showManagerGate(hash);
+      if (!passed) return;
       managerUnlockedFor=key;managerUnlockedHash=hash;
     }
   }
@@ -419,6 +478,131 @@ function bindManagerPage() {
 let quickToolsReturnPage = 'home';
 let quickToolDraft = { text: '', month: monthStr(), rules: [], preview: null };
 let quickToolPanelOpen = false;
+// ===================== 我的关注 =====================
+function favoriteCatalog() {
+  const admin = isAdmin();
+  const toolsTitle = admin ? '数据工具（全部数据）' : '数据工具（仅本人数据）';
+  const g = (pg, label, items) => ({ page: pg, label, items: items.filter(Boolean).map(i => ({ key: `${pg}:${i.id || ''}`, title: i.title, desc: i.desc || '' })).map(i => ({ ...i, page: pg })) });
+  return [
+    g('home', '首页', [
+      { id: 'overview', title: '今日与本月概览', desc: '查看关键数字并快速记录业绩' },
+      { id: 'core', title: '业绩核心汇总', desc: '按日期查看汇总大类' },
+      { id: 'today', title: '今日各项业绩', desc: '当天各类型数量与金额' },
+      { id: 'month', title: '本月各项业绩', desc: '本月类型汇总与最高项目' }
+    ]),
+    g('add', '记录', [{ id: '', title: '记录业绩', desc: '选择类型并录入数量' }]),
+    g('day', '日报', [
+      { id: 'overview', title: '日报概览', desc: '选择日期和成员并查看关键数字' },
+      { id: 'types', title: '各项业绩汇总', desc: '各类型当天数量与总价' },
+      { id: 'textsummary', title: '日报文本汇总', desc: '生成可直接复制的当日业绩文本' },
+      admin && { id: 'members', title: '成员价格明细', desc: '每位成员当天业绩明细' },
+      { id: 'details', title: '当天记录明细', desc: '查看或删除原始记录' }
+    ]),
+    g('month', '月报', [
+      { id: 'overview', title: '月度概览', desc: '选择月份和成员并查看总业绩' },
+      { id: 'chart', title: '类型月度对比', desc: '对比不同业绩的月总价或数量' },
+      { id: 'distribution', title: '业绩占比分布', desc: '各项业绩占当月总价格的比例' },
+      { id: 'trend', title: '单项每日趋势', desc: '某一业绩类型每日变化' },
+      { id: 'summary', title: '单项业绩汇总', desc: '每种业绩数量与总价' },
+      admin && { id: 'members', title: '成员月度明细', desc: '每位成员月度价格明细' }
+    ]),
+    g('settings', '我的', [
+      { id: 'account', title: '账号与密码', desc: '查看账号、修改密码或退出' },
+      { id: 'sync', title: '自动同步状态', desc: '查看同步状态并手动拉取或上传' },
+      { id: 'amount', title: '金额显示权限', desc: '金额可见范围' },
+      admin && { id: 'cloud', title: '统一云端配置', desc: '修改全公司数据存储位置' },
+      admin && { id: 'registration', title: '注册校验码', desc: '修改新用户注册校验码' },
+      admin && { id: 'users', title: '用户账号管理', desc: '重置密码、角色和账号状态' },
+      admin && { id: 'members', title: '成员管理', desc: '新增或维护成员资料' },
+      { id: 'typepool', title: '业绩类型池', desc: '挑选我的常用业绩类型' },
+      { id: 'types', title: admin ? '业绩类型与定价' : '我的业绩类型', desc: admin ? '定价并将个人类别转为公共类别' : '新增和查看个人可用类别' },
+      admin && { id: 'core', title: '核心汇总管理', desc: '维护首页核心汇总大类' },
+      admin && { id: 'reviews', title: '业绩二次审核', desc: '审核待生效的业绩记录' },
+      { id: 'reminder', title: '每日录入提醒', desc: '设置每天晚上的提醒时间' },
+      { id: 'tools', title: toolsTitle, desc: '导出数据或清理记录' },
+      { id: 'about', title: '关于该应用程序', desc: '版本信息和使用说明' }
+    ]),
+    { page: 'top', label: '顶部功能', items: [
+      { key: 'quicktools:', page: 'quicktools', title: '便捷工具', desc: '快速整理文本并生成汇总' },
+      { key: 'manager:', page: 'manager', title: '业绩管家', desc: '管理员直接进入，其他用户须验证口令' }
+    ] }
+  ];
+}
+function favoritesStorageKey() { return `bank-performance-favorites-v1:${currentUser()?.id || 'guest'}`; }
+function favoriteAllItems() { return favoriteCatalog().flatMap(group => group.items.map(i => ({ ...i, groupLabel: group.label }))); }
+function loadFavorites() {
+  let list = [];
+  try { list = JSON.parse(localStorage.getItem(favoritesStorageKey()) || '[]'); } catch {}
+  const valid = new Set(favoriteAllItems().map(i => i.key));
+  return (Array.isArray(list) ? list : []).filter((k, i, a) => valid.has(k) && a.indexOf(k) === i);
+}
+function saveFavorites(list) { try { localStorage.setItem(favoritesStorageKey(), JSON.stringify(list)); } catch {} }
+function toggleFavorite(key) {
+  const list = loadFavorites();
+  const next = list.includes(key) ? list.filter(k => k !== key) : [...list, key];
+  saveFavorites(next);
+  renderFavoritePanel();
+}
+function openFavorite(key) {
+  const item = favoriteAllItems().find(i => i.key === key);
+  if (!item) return;
+  closeFavoritePanel();
+  if (item.page === 'quicktools') { openQuickTools(); return; }
+  if (item.page === 'manager') { openManager(); return; }
+  const moduleId = key.slice(key.indexOf(':') + 1);
+  if (moduleId) window.__moduleViews = { ...(window.__moduleViews || {}), [item.page]: moduleId };
+  page = item.page;
+  render();
+  window.scrollTo(0, 0);
+}
+function closeFavoritePanel() {
+  const layer = document.getElementById('favLayer');
+  if (!layer) return;
+  layer.classList.remove('is-open');
+  document.getElementById('favHeaderBtn')?.setAttribute('aria-expanded', 'false');
+  setTimeout(() => { if (!layer.classList.contains('is-open')) layer.remove(); }, 220);
+}
+function renderFavoritePanel() {
+  const layer = document.getElementById('favLayer');
+  if (!layer) return;
+  const favs = loadFavorites();
+  const all = favoriteAllItems();
+  const byKey = new Map(all.map(i => [i.key, i]));
+  const tiles = favs.map(k => byKey.get(k)).filter(Boolean).map(i => `<div class="fav-tile">
+      <button type="button" class="fav-tile-main" data-fav-open="${safeHtml(i.key)}"><strong>${safeHtml(i.title)}</strong><span>${safeHtml(i.groupLabel)}</span></button>
+      <button type="button" class="fav-tile-remove" data-fav-toggle="${safeHtml(i.key)}" aria-label="取消关注${safeHtml(i.title)}">✕</button>
+    </div>`).join('');
+  const groups = favoriteCatalog().map(group => `<div class="fav-group"><h4>${safeHtml(group.label)}</h4>${group.items.map(i => {
+      const on = favs.includes(i.key);
+      return `<div class="fav-row"><button type="button" class="fav-row-main" data-fav-open="${safeHtml(i.key)}"><strong>${safeHtml(i.title)}</strong><span>${safeHtml(i.desc)}</span></button><button type="button" class="fav-star ${on ? 'on' : ''}" data-fav-toggle="${safeHtml(i.key)}" aria-pressed="${on}" aria-label="${on ? '取消关注' : '加入关注'}${safeHtml(i.title)}">${on ? '已关注' : '+ 关注'}</button></div>`;
+    }).join('')}</div>`).join('');
+  const bodyEl = layer.querySelector('.fav-body');
+  const keepScroll = bodyEl.scrollTop;
+  layer.querySelector('.fav-fixed').innerHTML = `<section class="fav-section"><h3>已关注 <em>${favs.length}</em></h3>${tiles ? `<div class="fav-grid">${tiles}</div>` : '<div class="fav-empty">还没有关注的功能，从下方“全部功能”里点“+ 关注”添加，之后可在这里一键直达。</div>'}</section>`;
+  bodyEl.innerHTML = `<section class="fav-section"><h3>全部功能</h3><p class="fav-tip">点功能名称直接前往；点右侧“+ 关注”加入我的关注。</p>${groups}</section>`;
+  bodyEl.scrollTop = keepScroll;
+  layer.querySelectorAll('[data-fav-open]').forEach(b => b.onclick = () => openFavorite(b.dataset.favOpen));
+  layer.querySelectorAll('[data-fav-toggle]').forEach(b => b.onclick = () => toggleFavorite(b.dataset.favToggle));
+}
+function openFavoritePanel() {
+  if (!requireAuth('请先登录后再使用')) return;
+  const existing = document.getElementById('favLayer');
+  if (existing) { closeFavoritePanel(); return; }
+  closeSmartSelects?.();
+  const layer = document.createElement('div');
+  layer.id = 'favLayer';
+  layer.className = 'fav-layer';
+  layer.innerHTML = `<div class="fav-backdrop" data-fav-close></div><section class="fav-panel" role="dialog" aria-modal="true" aria-label="我的关注">
+    <div class="fav-head"><h2>我的关注</h2><button type="button" class="fav-close" data-fav-close aria-label="关闭">✕</button></div>
+    <div class="fav-fixed"></div><div class="fav-body"></div></section>`;
+  document.body.appendChild(layer);
+  layer.querySelectorAll('[data-fav-close]').forEach(b => b.onclick = closeFavoritePanel);
+  renderFavoritePanel();
+  document.getElementById('favHeaderBtn')?.setAttribute('aria-expanded', 'true');
+  requestAnimationFrame(() => layer.classList.add('is-open'));
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.getElementById('favLayer')) closeFavoritePanel(); });
+
 function openQuickTools() {
   if (!requireAuth()) return;
   if (page !== 'quicktools') quickToolsReturnPage = page === 'manager' ? 'settings' : page;
@@ -710,6 +894,7 @@ function reminderPlatformHint() {
   if (document.documentElement.classList.contains('native-windows')) {
     return 'Windows 桌面版在软件窗口保持运行时发送系统通知；关闭软件后不会继续后台提醒。首次测试时请允许 Microsoft Edge 通知权限。';
   }
+  if (IN_MINIPROGRAM) return '微信小程序内无法发送本地定时通知；如需按时提醒，请使用 Android 版，或自行设置微信/手机闹钟提醒。';
   return '网页端仅在页面保持打开时尝试提醒；关闭浏览器后的可靠任务栏通知需要使用 Android APK。';
 }
 function todayStr(d = new Date()) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; }
@@ -895,7 +1080,7 @@ function updateSyncStatusDom() {
   el.textContent = syncStatusText();
   el.className = `pill ${syncMeta.status === 'error' ? 'danger-pill' : syncMeta.pending ? 'warning-pill' : 'success-pill'}`;
   const top = document.getElementById('syncBtn');
-  if (top && currentUser()) top.textContent = syncMeta.status === 'syncing' ? '同步中…' : syncMeta.pending ? '有待同步' : '立即同步';
+  if (top && currentUser()) top.textContent = syncButtonText();
 }
 function loadLocal() {
   try {
@@ -1160,6 +1345,7 @@ function coreSummaryTpl(date = todayStr()) {
     </article>`;
   }).join('')}</div>`;
 }
+function syncButtonText() { return syncMeta.status === 'syncing' ? '正在\n同步' : syncMeta.pending ? '有待\n同步' : '立即\n同步'; }
 function renderHeader() {
   const user = currentUser();
   const eyebrow = document.querySelector('.eyebrow');
@@ -1170,6 +1356,9 @@ function renderHeader() {
   const quickBack=document.getElementById('quickHeaderBackBtn');
   if(quickBtn)quickBtn.style.display=user && page!=='quicktools'?'':'none';
   if(quickBack)quickBack.style.display=user && page==='quicktools'?'':'none';
+  const favBtn=document.getElementById('favHeaderBtn');
+  if(favBtn)favBtn.style.display=user?'':'none';
+  if(!user)closeFavoritePanel();
   const mgrBtn=document.getElementById('managerHeaderBtn');
   const backBtn=document.getElementById('managerBackBtn');
   if(mgrBtn)mgrBtn.style.display=user && page!=='manager' && page!=='quicktools'?'':'none';
@@ -1182,7 +1371,7 @@ function renderHeader() {
   }
   const roleText = isAdmin(user) ? '管理员' : '个人账号';
   eyebrow.textContent = `${safeHtml(user.displayName || user.username)} · ${roleText}`;
-  syncBtn.textContent = syncMeta.status === 'syncing' ? '同步中…' : syncMeta.pending ? '有待同步' : '立即同步';
+  syncBtn.textContent = syncButtonText();
   syncBtn.style.display = '';
 }
 function render() {
@@ -1376,12 +1565,19 @@ function dayTpl() {
       <div class="metric light"><div class="label">上报记录 / 项目</div><div class="value" style="font-size:19px">${recs.length} 笔 / ${typeSummary(recs).length} 项</div></div>
     </div><div style="margin-top:10px">${pricingHint(recs)}</div>`, date);
   const types = moduleCardTpl('day', 'types', `各项业绩${showAmount ? '总价' : '汇总'}`, `<p class="muted">${showAmount ? '数量 × 管理员单价' : amountVisibilityLabel()}</p>${summaryList(typeSummary(recs))}`, date);
-  const withHeader = window.__dayTextHeader !== false;
-  const summaryText = dayTextSummaryText(recs, withHeader);
+  const textPrefs = loadTextPrefs();
+  const withHeader = textPrefs.header;
+  const summaryText = dayTextSummaryText(recs, textPrefs);
+  const exampleLine = `${textPrefs.comma ? '吸金，10' : '吸金10'}${textPrefs.unit ? (textPrefs.comma ? '，万' : '万') : ''}`;
   const textSummary = moduleCardTpl('day', 'textsummary', '日报文本汇总', `
     <div class="row wrap module-toolbar"><input id="dayPicker" type="date" value="${date}" style="max-width:150px">${memberFilterTpl('dayMemberFilter')}</div>
     <p class="muted">按“业绩名称，数量或者金额，单位”汇总当天业绩，直接在下方文本框中复制即可，不会生成任何文件。</p>
-    <label class="manager-check"><input id="dayTextHeader" type="checkbox" ${withHeader ? 'checked' : ''}> 包含首行“业绩名称，数量或者金额，单位”</label>
+    <div class="text-opts" role="group" aria-label="文本格式选项">
+      <label class="opt-chip"><input id="dayTextHeader" type="checkbox" ${textPrefs.header ? 'checked' : ''}><span>首行标题</span></label>
+      <label class="opt-chip"><input id="dayTextComma" type="checkbox" ${textPrefs.comma ? 'checked' : ''}><span>保留逗号“，”</span></label>
+      <label class="opt-chip"><input id="dayTextUnit" type="checkbox" ${textPrefs.unit ? 'checked' : ''}><span>显示单位</span></label>
+    </div>
+    <div class="field-hint">当前格式示例：<strong>${exampleLine}</strong>（勾选项会记住，下次打开仍生效）</div>
     <textarea id="dayTextSummary" class="day-text-summary" rows="8" readonly placeholder="当天暂无业绩记录">${safeHtml(summaryText)}</textarea>
     <div class="row wrap" style="margin-top:10px"><button type="button" id="dayTextCopyBtn" class="primary">复制全部文本</button><button type="button" id="dayTextSelectBtn" class="ghost">全选文本</button></div>
     <div class="field-hint">${summaryText ? `共 ${summaryText.split('\n').length - (withHeader ? 1 : 0)} 项业绩（${recs.length} 笔记录汇总）；同名同单位的业绩已合并。` : '当天暂无可汇总的业绩。'}</div>`, date);
@@ -1392,7 +1588,8 @@ function dayTpl() {
 function monthTpl() {
   const month = window.__selectedMonth || monthStr();
   const memberId = currentMemberFilter();
-  const availableTrendTypes = isAdmin() && memberId === 'all' ? visibleTypes() : typesForMember(memberId);
+  const trendBaseTypes = isAdmin() && memberId === 'all' ? visibleTypes() : typesForMember(memberId);
+  const availableTrendTypes = applyTypePool(trendBaseTypes, isAdmin() && memberId === 'all' ? (currentUser()?.memberId || '') : memberId);
   const selectedType = availableTrendTypes.some(t => t.id === window.__selectedTypeId) ? window.__selectedTypeId : '';
   const recs = monthRecords(month, memberId);
   const typeItems = typeSummary(recs);
@@ -1414,7 +1611,7 @@ function monthTpl() {
   const chart = moduleCardTpl('month', 'chart', `不同业绩月${showAmount ? '总价格' : '总数量'}`, typeBarChart(typeItems), showAmount ? '同时显示数量与总价' : '按业绩数量展示');
   const distribution = moduleCardTpl('month', 'distribution', '业绩占比分布', performanceShareDistribution(typeItems, recs), amountVisibilityMode() === 'hidden' ? '金额已隐藏，仅展示占比' : '按当月业绩价格计算');
   const trend = moduleCardTpl('month', 'trend', '单项业绩每日趋势', `
-    <div class="module-toolbar"><select id="trendTypePicker" class="compact-select">${isAdmin() && memberId === 'all' ? typeSelectOptions(selectedType, '', true) : typeSelectOptions(selectedType, memberId, true)}</select></div>
+    <div class="trend-picker-box"><div class="trend-picker-label"><span>选择业绩类型</span><em>仅显示“业绩类型池”中的类型；切换后查看该类型每天的数量变化</em></div><select id="trendTypePicker" class="trend-select">${isAdmin() && memberId === 'all' ? typeSelectOptions(selectedType, '', true, true) : typeSelectOptions(selectedType, memberId, true, true)}</select></div>
     ${availableTrendTypes.length ? singleTypeDailyTrend(month, selectedType, memberId) : '<div class="empty">请先新增业绩类型</div>'}`, month);
   const summary = moduleCardTpl('month', 'summary', `本月单项业绩数量${showAmount ? '与总价' : ''}`, summaryList(typeItems, true), month);
   const members = isAdmin() ? moduleCardTpl('month', 'members', '每位成员月度业绩价格明细', memberPricingBreakdown(recs, '本月'), '管理员视图') : '';
@@ -1531,7 +1728,23 @@ function typePoolTpl() {
     <div class="list" id="poolAvailableList">${availableList || '<div class="empty">没有更多可加入的类型</div>'}</div>
     ${others.length ? `<div class="section-title pool-section-title"><h3>其他成员的个人类型（${others.length}）</h3></div><div class="list" id="poolOthersList">${othersList}</div>` : ''}`;
 }
-function dayTextSummaryText(records, withHeader = true) {
+const TEXT_PREFS_KEY = 'bank-performance-text-summary-prefs-v1';
+function loadTextPrefs() {
+  try {
+    const v = JSON.parse(localStorage.getItem(TEXT_PREFS_KEY) || '{}');
+    return { header: v.header !== false, comma: v.comma !== false, unit: v.unit !== false };
+  } catch { return { header: true, comma: true, unit: true }; }
+}
+function saveTextPrefs(patch) {
+  const next = { ...loadTextPrefs(), ...patch };
+  try { localStorage.setItem(TEXT_PREFS_KEY, JSON.stringify(next)); } catch {}
+  return next;
+}
+function dayTextSummaryText(records, opts = true) {
+  const o = opts && typeof opts === 'object'
+    ? { header: opts.header !== false, comma: opts.comma !== false, unit: opts.unit !== false }
+    : { header: opts !== false, comma: true, unit: true };
+  const sep = o.comma ? '，' : '';
   const groups = new Map();
   orderedTxtSummary(validRecords(records)).forEach(x => {
     const name = String(x.type.name || '').trim() || '未命名';
@@ -1540,9 +1753,10 @@ function dayTextSummaryText(records, withHeader = true) {
     if (!groups.has(key)) groups.set(key, { name, unit, value: 0 });
     groups.get(key).value += Number(x.value || 0);
   });
-  const lines = Array.from(groups.values()).filter(g => g.value !== 0).map(g => `${g.name}，${formatTxtNumber(g.value)}，${g.unit}`);
+  const lines = Array.from(groups.values()).filter(g => g.value !== 0).map(g => `${g.name}${sep}${formatTxtNumber(g.value)}${o.unit ? sep + g.unit : ''}`);
   if (!lines.length) return '';
-  return (withHeader ? ['业绩名称，数量或者金额，单位', ...lines] : lines).join('\n');
+  const header = ['业绩名称', '数量或者金额', ...(o.unit ? ['单位'] : [])].join(sep);
+  return (o.header ? [header, ...lines] : lines).join('\n');
 }
 async function copyTextBox(el) {
   const text = el?.value || '';
@@ -2164,6 +2378,7 @@ function enhanceReportControls() {
   enhanceSelectControl(document.getElementById('recordTypeSelect'), { icon: '类', menuLabel: '选择业绩类型' });
   enhanceSelectControl(document.getElementById('dayMemberFilter'), { icon: '人', compact: true, wideMenu: true, menuLabel: '选择日报成员' });
   enhanceSelectControl(document.getElementById('monthMemberFilter'), { icon: '人', compact: true, wideMenu: true, menuLabel: '选择月报成员' });
+  enhanceSelectControl(document.getElementById('trendTypePicker'), { icon: '趋', menuLabel: '选择趋势业绩类型' });
   enhanceTemporalControl(document.getElementById('recordDatePicker'), { mode: 'date', title: '选择业绩记录日期' });
   enhanceTemporalControl(document.getElementById('dayPicker'), { mode: 'date', title: '选择日报日期', compact: true });
   enhanceTemporalControl(document.getElementById('monthPicker'), { mode: 'month', title: '选择月报月份', compact: true });
@@ -2518,12 +2733,11 @@ function bindPage() {
     typePoolSearch.oninput = applyPoolSearch;
     applyPoolSearch();
   }
-  const dayTextHeader = document.getElementById('dayTextHeader');
   const dayTextSummaryBox = document.getElementById('dayTextSummary');
-  if (dayTextHeader && dayTextSummaryBox) dayTextHeader.onchange = () => {
-    window.__dayTextHeader = dayTextHeader.checked;
-    render();
-  };
+  [['dayTextHeader', 'header'], ['dayTextComma', 'comma'], ['dayTextUnit', 'unit']].forEach(([id, key]) => {
+    const el = document.getElementById(id);
+    if (el) el.onchange = () => { saveTextPrefs({ [key]: el.checked }); render(); };
+  });
   if (dayTextSummaryBox) {
     dayTextSummaryBox.onfocus = () => { try { dayTextSummaryBox.select(); } catch {} };
     const copyBtn = document.getElementById('dayTextCopyBtn');
@@ -3622,6 +3836,7 @@ function normalizeData(d = {}) {
   return { version: 10, typePools, performanceManager: normalizeManager(d.performanceManager), registrationCode: d.registrationCode || base.registrationCode || '123456', settings, users, members, types, records, deletedRecords, deletedUsers, deletedMembers, coreSummaries: groups, updatedAt: d.updatedAt || now };
 }
 function downloadBlob(filename, blob) {
+  if (IN_MINIPROGRAM) { showToast('微信小程序内无法直接下载文件，请使用电脑浏览器或 Android 版导出；日报文本汇总可直接复制'); return; }
   const bridge = window.AndroidBridge || window.Android;
   if (bridge && typeof bridge.saveBase64 === 'function') {
     const reader = new FileReader();
@@ -4035,6 +4250,7 @@ document.querySelectorAll('.tabbar button').forEach(b => b.onclick = () => {
   page = b.dataset.page; render();
 });
 document.getElementById('syncBtn').onclick = () => pushToYunduan(true);
+document.getElementById('favHeaderBtn').onclick = openFavoritePanel;
 document.getElementById('managerHeaderBtn').onclick=openManager;
 document.getElementById('quickHeaderBtn').onclick=openQuickTools;
 document.getElementById('quickHeaderBackBtn').onclick=()=>{captureQuickDraft();closeQuickTools();};
@@ -4054,7 +4270,7 @@ setInterval(() => {
   if (!currentUser() || !cloudReady() || syncInFlight) return;
   syncMeta.pending ? pushToYunduan(false) : pullFromYunduan(false);
 }, 90000);
-if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+if (!IN_MINIPROGRAM && 'serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
 if (hasNativeReminder()) { applyNativeReminder(reminderSettings); readNativeReminderStatus(); } else scheduleBrowserReminderLoop();
 render();
 setTimeout(async () => {
